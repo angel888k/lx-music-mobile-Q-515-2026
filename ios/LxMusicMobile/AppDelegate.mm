@@ -1320,7 +1320,7 @@ RCT_EXPORT_MODULE();
     self.engine = [[AVAudioEngine alloc] init];
     self.playerNode = [[AVAudioPlayerNode alloc] init];
     self.timePitchNode = [[AVAudioUnitTimePitch alloc] init];
-    self.equalizerNode = [[AVAudioUnitEQ alloc] initWithNumberOfBands:(AVAudioUnitEQBandCount)LXSoundEffectEqualizerFrequencies().count];
+    self.equalizerNode = [[AVAudioUnitEQ alloc] initWithNumberOfBands:(NSUInteger)LXSoundEffectEqualizerFrequencies().count];
     [self.engine attachNode:self.playerNode];
     [self.engine attachNode:self.timePitchNode];
     [self.engine attachNode:self.equalizerNode];
