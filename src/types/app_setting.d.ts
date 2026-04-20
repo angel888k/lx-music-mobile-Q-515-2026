@@ -3,6 +3,7 @@ import type { I18n } from '@/lang/i18n'
 declare global {
   namespace LX {
     type AddMusicLocationType = 'top' | 'bottom'
+    type SoundEffectPresetId = 'none' | 'electronic' | 'slowSong' | 'bass' | 'classical' | 'speech' | 'deep' | 'loudness' | 'custom'
 
     interface AppSetting {
       version: string
@@ -197,6 +198,66 @@ declare global {
        * 是否启用蓝牙歌词
        */
       'player.isShowBluetoothLyric': boolean
+
+      /**
+       * 是否启用音效
+       */
+      'player.soundEffect.enabled': boolean
+
+      /**
+       * 当前音效预设
+       */
+      'player.soundEffect.preset': SoundEffectPresetId
+
+      /**
+       * 31Hz EQ 增益
+       */
+      'player.soundEffect.eq.31': number
+
+      /**
+       * 62Hz EQ 增益
+       */
+      'player.soundEffect.eq.62': number
+
+      /**
+       * 125Hz EQ 增益
+       */
+      'player.soundEffect.eq.125': number
+
+      /**
+       * 250Hz EQ 增益
+       */
+      'player.soundEffect.eq.250': number
+
+      /**
+       * 500Hz EQ 增益
+       */
+      'player.soundEffect.eq.500': number
+
+      /**
+       * 1kHz EQ 增益
+       */
+      'player.soundEffect.eq.1000': number
+
+      /**
+       * 2kHz EQ 增益
+       */
+      'player.soundEffect.eq.2000': number
+
+      /**
+       * 4kHz EQ 增益
+       */
+      'player.soundEffect.eq.4000': number
+
+      /**
+       * 8kHz EQ 增益
+       */
+      'player.soundEffect.eq.8000': number
+
+      /**
+       * 16kHz EQ 增益
+       */
+      'player.soundEffect.eq.16000': number
 
       /**
        * 播放详情页-是否缩放当前播放的歌词行

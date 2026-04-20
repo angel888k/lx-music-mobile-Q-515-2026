@@ -1,6 +1,6 @@
 import TrackPlayer, { Event as TPEvent, State as TPState } from 'react-native-track-player'
 import { Platform } from 'react-native'
-import { getCurrentTrackId } from '../../playList'
+import { getCurrentTrackId } from '../../trackPlayerCore'
 import type { UnifiedPlaybackState } from '../types'
 import type { UnifiedPlayerEventBus } from '../EventBus'
 

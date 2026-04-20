@@ -120,7 +120,6 @@ export const getTrackDuration = async() => {
 
 export const clearTracks = () => {
   list.length = 0
-  prevArtwork = undefined
   trackPlayerState.isPlaying = false
   trackPlayerState.prevDuration = -1
 }

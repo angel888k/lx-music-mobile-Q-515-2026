@@ -891,6 +891,72 @@ static NSArray<NSString *> *LXDocumentTypesForExtensions(id extTypes) {
   return types.count ? types.array : @[ @"public.data", @"public.item" ];
 }
 
+static NSString * const LXSoundEffectConfigDidChangeNotification = @"LXSoundEffectConfigDidChangeNotification";
+
+static NSArray<NSNumber *> *LXSoundEffectEqualizerFrequencies(void) {
+  static NSArray<NSNumber *> *frequencies = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    frequencies = @[ @31, @62, @125, @250, @500, @1000, @2000, @4000, @8000, @16000 ];
+  });
+  return frequencies;
+}
+
+static NSArray<NSNumber *> *LXSoundEffectDefaultEqualizerGains(void) {
+  static NSArray<NSNumber *> *gains = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    gains = @[ @0, @0, @0, @0, @0, @0, @0, @0, @0, @0 ];
+  });
+  return gains;
+}
+
+static BOOL LXSoundEffectEqualizerEnabled = NO;
+static NSArray<NSNumber *> *LXSoundEffectEqualizerGains = nil;
+
+static NSDictionary *LXCurrentSoundEffectConfig(void) {
+  NSArray<NSNumber *> *gains = LXSoundEffectEqualizerGains;
+  if (gains == nil || gains.count != LXSoundEffectEqualizerFrequencies().count) gains = LXSoundEffectDefaultEqualizerGains();
+  return @{
+    @"enabled": @(LXSoundEffectEqualizerEnabled),
+    @"gains": gains,
+  };
+}
+
+static void LXUpdateSoundEffectConfig(NSDictionary *config) {
+  BOOL enabled = [config[@"enabled"] boolValue];
+  NSMutableArray<NSNumber *> *nextGains = [NSMutableArray arrayWithCapacity:LXSoundEffectEqualizerFrequencies().count];
+  NSArray *inputGains = [config[@"gains"] isKindOfClass:[NSArray class]] ? config[@"gains"] : nil;
+  for (NSUInteger index = 0; index < LXSoundEffectEqualizerFrequencies().count; index += 1) {
+    id value = index < inputGains.count ? inputGains[index] : nil;
+    [nextGains addObject:@([value respondsToSelector:@selector(floatValue)] ? [value floatValue] : 0.0f)];
+  }
+
+  LXSoundEffectEqualizerEnabled = enabled;
+  LXSoundEffectEqualizerGains = nextGains.copy;
+  [[NSNotificationCenter defaultCenter] postNotificationName:LXSoundEffectConfigDidChangeNotification
+                                                      object:nil
+                                                    userInfo:LXCurrentSoundEffectConfig()];
+}
+
+@interface SoundEffectModule : NSObject<RCTBridgeModule>
+@end
+
+@implementation SoundEffectModule
+
+RCT_EXPORT_MODULE();
+
++ (BOOL)requiresMainQueueSetup {
+  return YES;
+}
+
+RCT_REMAP_METHOD(updateEqualizerConfig, updateEqualizerConfig:(NSDictionary *)config resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
+  LXUpdateSoundEffectConfig(config ?: @{});
+  resolve(nil);
+}
+
+@end
+
 @interface StreamingFlacPlayerModule : RCTEventEmitter<RCTBridgeModule, NSURLSessionDataDelegate>
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) NSURLSessionDataTask *task;
@@ -901,6 +967,7 @@ static NSArray<NSString *> *LXDocumentTypesForExtensions(id extTypes) {
 @property (nonatomic, strong) AVAudioEngine *engine;
 @property (nonatomic, strong) AVAudioPlayerNode *playerNode;
 @property (nonatomic, strong) AVAudioUnitTimePitch *timePitchNode;
+@property (nonatomic, strong) AVAudioUnitEQ *equalizerNode;
 @property (nonatomic, strong) AVAudioFormat *outputFormat;
 @property (nonatomic, copy) NSString *currentState;
 @property (nonatomic, copy) NSString *currentURL;
@@ -970,6 +1037,10 @@ RCT_EXPORT_MODULE();
                                              selector:@selector(handleAudioSessionInterruption:)
                                                  name:AVAudioSessionInterruptionNotification
                                                object:[AVAudioSession sharedInstance]];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleSoundEffectConfigChanged:)
+                                                 name:LXSoundEffectConfigDidChangeNotification
+                                               object:nil];
   }
   return self;
 }
@@ -1081,6 +1152,37 @@ RCT_EXPORT_MODULE();
   self.playbackGeneration += 1;
   self.playbackAnchorFrame = 0;
   self.outputFormat = nil;
+  self.equalizerNode = nil;
+}
+
+- (void)handleSoundEffectConfigChanged:(NSNotification *)notification {
+  dispatch_async(self.renderQueue, ^{
+    [self applySoundEffectConfigLocked];
+  });
+}
+
+- (void)applySoundEffectConfigLocked {
+  if (self.equalizerNode == nil) return;
+
+  NSDictionary *config = LXCurrentSoundEffectConfig();
+  BOOL enabled = [config[@"enabled"] boolValue];
+  NSArray<NSNumber *> *gains = [config[@"gains"] isKindOfClass:[NSArray class]] ? config[@"gains"] : LXSoundEffectDefaultEqualizerGains();
+  NSArray<NSNumber *> *frequencies = LXSoundEffectEqualizerFrequencies();
+  NSUInteger bandCount = MIN(MIN(gains.count, frequencies.count), self.equalizerNode.bands.count);
+
+  self.equalizerNode.globalGain = 0.0f;
+  self.equalizerNode.bypass = !enabled;
+  for (NSUInteger index = 0; index < bandCount; index += 1) {
+    AVAudioUnitEQFilterParameters *band = self.equalizerNode.bands[index];
+    band.filterType = AVAudioUnitEQFilterTypeParametric;
+    band.frequency = [frequencies[index] floatValue];
+    band.bandwidth = 1.41f;
+    band.gain = [gains[index] floatValue];
+    band.bypass = !enabled;
+  }
+  for (NSUInteger index = bandCount; index < self.equalizerNode.bands.count; index += 1) {
+    self.equalizerNode.bands[index].bypass = YES;
+  }
 }
 
 - (void)handleAudioSessionInterruption:(NSNotification *)notification {
@@ -1218,12 +1320,16 @@ RCT_EXPORT_MODULE();
     self.engine = [[AVAudioEngine alloc] init];
     self.playerNode = [[AVAudioPlayerNode alloc] init];
     self.timePitchNode = [[AVAudioUnitTimePitch alloc] init];
+    self.equalizerNode = [[AVAudioUnitEQ alloc] initWithNumberOfBands:(AVAudioUnitEQBandCount)LXSoundEffectEqualizerFrequencies().count];
     [self.engine attachNode:self.playerNode];
     [self.engine attachNode:self.timePitchNode];
+    [self.engine attachNode:self.equalizerNode];
     [self.engine connect:self.playerNode to:self.timePitchNode format:self.outputFormat];
-    [self.engine connect:self.timePitchNode to:self.engine.mainMixerNode format:self.outputFormat];
+    [self.engine connect:self.timePitchNode to:self.equalizerNode format:self.outputFormat];
+    [self.engine connect:self.equalizerNode to:self.engine.mainMixerNode format:self.outputFormat];
     self.playerNode.volume = self.currentVolume;
     self.timePitchNode.rate = self.currentRate;
+    [self applySoundEffectConfigLocked];
     [self.engine prepare];
 
     NSError *error = nil;
@@ -1243,6 +1349,7 @@ RCT_EXPORT_MODULE();
   }
   if (self.playerNode != nil) self.playerNode.volume = self.currentVolume;
   if (self.timePitchNode != nil) self.timePitchNode.rate = self.currentRate;
+  [self applySoundEffectConfigLocked];
   return YES;
 }
 
