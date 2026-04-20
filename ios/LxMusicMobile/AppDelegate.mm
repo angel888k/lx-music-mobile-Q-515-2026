@@ -1987,9 +1987,12 @@ RCT_EXPORT_MODULE();
 }
 
 - (void)refreshPitchShifterEngineLockedWithPitchFactor:(float)pitchFactor {
-  (void)pitchFactor;
-  // Keep native FLAC on AVAudioUnitTimePitch until the streaming phase-vocoder path is calibrated.
-  self.pitchShifterEngine = nil;
+  if (self.sampleRate <= 0 || self.channels == 0 || fabsf(pitchFactor - 1.0f) <= 0.001f) {
+    self.pitchShifterEngine = nil;
+    return;
+  }
+  if (self.pitchShifterEngine != nil) return;
+  self.pitchShifterEngine = [[LXStreamingPhaseVocoderPitchShifter alloc] initWithChannelCount:self.channels];
 }
 
 - (void)applySoundEffectConfigLocked {
@@ -2043,7 +2046,7 @@ RCT_EXPORT_MODULE();
 
   if (self.timePitchNode != nil) {
     self.timePitchNode.rate = self.currentRate;
-    self.timePitchNode.pitch = LXSoundEffectPitchFactorToCents(pitchPlaybackRate);
+    self.timePitchNode.pitch = 0.0f;
   }
 
   if (self.reverbNode != nil) {
@@ -2348,6 +2351,9 @@ RCT_EXPORT_MODULE();
   dispatch_sync(self.renderQueue, ^{
     if (self.playerNode == nil || self.stopRequested) return;
 
+    if (self.pitchShifterEngine != nil) {
+      [self.pitchShifterEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels pitchFactor:LXSoundEffectPitchShifterPlaybackRate];
+    }
     if (self.convolutionEngine != nil) {
       [self.convolutionEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels];
     }
