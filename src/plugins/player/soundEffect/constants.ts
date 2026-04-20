@@ -28,41 +28,63 @@ export const equalizerPresets: readonly EqualizerPreset[] = Object.freeze([
     gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
   },
   {
-    id: 'electronic',
-    nameKey: 'setting_play_sound_effect_preset_electronic',
-    gains: [4, 3, -2, 0, -1, 2, 0.5, 4, 5, 4],
+    id: 'pop',
+    nameKey: 'setting_play_sound_effect_preset_pop',
+    gains: [6, 5, -3, -2, 5, 4, -4, -3, 6, 4],
   },
   {
-    id: 'slowSong',
-    nameKey: 'setting_play_sound_effect_preset_slow_song',
-    gains: [3.5, 2.7, 1.5, 0.5, -0.5, -1.3, -1.6, -1.8, -2.5, -3],
+    id: 'dance',
+    nameKey: 'setting_play_sound_effect_preset_dance',
+    gains: [4, 3, -4, -6, 0, 0, 3, 4, 4, 5],
   },
   {
-    id: 'bass',
-    nameKey: 'setting_play_sound_effect_preset_bass',
-    gains: [2.4, 2.4, 4, 5, 1.5, -0.6, -1.5, -2.7, -3.3, -4.8],
+    id: 'rock',
+    nameKey: 'setting_play_sound_effect_preset_rock',
+    gains: [7, 6, 2, 1, -3, -4, 2, 1, 4, 5],
   },
   {
     id: 'classical',
     nameKey: 'setting_play_sound_effect_preset_classical',
-    gains: [4.2, 3.8, 2.5, 1.2, -1.2, -1.2, 0, 1.2, 2.5, 4],
+    gains: [6, 7, 1, 2, -1, 1, -4, -6, -7, -8],
   },
   {
-    id: 'speech',
-    nameKey: 'setting_play_sound_effect_preset_speech',
-    gains: [-2.6, -3.5, -1.4, 1.2, 5.3, 5.3, 1.2, -1.4, -3.5, -4.8],
+    id: 'vocal',
+    nameKey: 'setting_play_sound_effect_preset_vocal',
+    gains: [-5, -6, -4, -3, 3, 4, 5, 4, -3, -3],
   },
   {
-    id: 'deep',
-    nameKey: 'setting_play_sound_effect_preset_deep',
-    gains: [5, 4.8, 3.2, 1.5, -2.2, -2.2, 1.5, 1.8, 4, 5],
+    id: 'slow',
+    nameKey: 'setting_play_sound_effect_preset_slow',
+    gains: [5, 4, 2, 0, -2, 0, 3, 6, 7, 8],
   },
   {
-    id: 'loudness',
-    nameKey: 'setting_play_sound_effect_preset_loudness',
-    gains: [4, 4, 0, 0, -2.8, 0, 1.8, -1.2, 4, 1.2],
+    id: 'electronic',
+    nameKey: 'setting_play_sound_effect_preset_electronic',
+    gains: [6, 5, 0, -5, -4, 0, 6, 8, 8, 7],
+  },
+  {
+    id: 'subwoofer',
+    nameKey: 'setting_play_sound_effect_preset_subwoofer',
+    gains: [8, 7, 5, 4, 0, 0, 0, 0, 0, 0],
+  },
+  {
+    id: 'soft',
+    nameKey: 'setting_play_sound_effect_preset_soft',
+    gains: [-5, -5, -4, -4, 3, 2, 4, 4, 0, 0],
   },
 ])
+
+const presetAliasMap: Partial<Record<LX.SoundEffectPresetId, Exclude<LX.SoundEffectPresetId, 'custom'>>> = {
+  loudness: 'pop',
+  slowSong: 'slow',
+  bass: 'subwoofer',
+  speech: 'vocal',
+  deep: 'soft',
+}
+
+export const normalizeEqualizerPresetId = (presetId: LX.SoundEffectPresetId): LX.SoundEffectPresetId => {
+  return presetAliasMap[presetId] ?? presetId
+}
 
 export const getEqualizerBandSettingKey = (frequency: EqualizerFrequency): SoundEffectBandSettingKey => {
   return bandSettingKeyMap[frequency]
@@ -101,7 +123,8 @@ export const hasEnabledEqualizerGains = (gains: readonly number[]) => {
 }
 
 export const getEqualizerPreset = (presetId: LX.SoundEffectPresetId) => {
-  return equalizerPresets.find(preset => preset.id == presetId) ?? equalizerPresets[0]
+  const normalizedPresetId = normalizeEqualizerPresetId(presetId)
+  return equalizerPresets.find(preset => preset.id == normalizedPresetId) ?? equalizerPresets[0]
 }
 
 export const getEqualizerGains = (setting = settingState.setting) => {

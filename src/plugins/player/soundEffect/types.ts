@@ -19,13 +19,15 @@ export type SoundEffectSettingKey =
 
 export type EqualizerPresetNameKey =
   | 'setting_play_sound_effect_preset_none'
+  | 'setting_play_sound_effect_preset_pop'
+  | 'setting_play_sound_effect_preset_dance'
+  | 'setting_play_sound_effect_preset_rock'
   | 'setting_play_sound_effect_preset_electronic'
-  | 'setting_play_sound_effect_preset_slow_song'
-  | 'setting_play_sound_effect_preset_bass'
   | 'setting_play_sound_effect_preset_classical'
-  | 'setting_play_sound_effect_preset_speech'
-  | 'setting_play_sound_effect_preset_deep'
-  | 'setting_play_sound_effect_preset_loudness'
+  | 'setting_play_sound_effect_preset_vocal'
+  | 'setting_play_sound_effect_preset_slow'
+  | 'setting_play_sound_effect_preset_subwoofer'
+  | 'setting_play_sound_effect_preset_soft'
 
 export interface EqualizerPreset {
   id: Exclude<LX.SoundEffectPresetId, 'custom'>

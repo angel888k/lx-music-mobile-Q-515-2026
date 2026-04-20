@@ -3,7 +3,23 @@ import type { I18n } from '@/lang/i18n'
 declare global {
   namespace LX {
     type AddMusicLocationType = 'top' | 'bottom'
-    type SoundEffectPresetId = 'none' | 'electronic' | 'slowSong' | 'bass' | 'classical' | 'speech' | 'deep' | 'loudness' | 'custom'
+    type SoundEffectPresetId =
+      | 'none'
+      | 'pop'
+      | 'dance'
+      | 'rock'
+      | 'classical'
+      | 'vocal'
+      | 'slow'
+      | 'electronic'
+      | 'subwoofer'
+      | 'soft'
+      | 'custom'
+      | 'slowSong'
+      | 'bass'
+      | 'speech'
+      | 'deep'
+      | 'loudness'
 
     interface AppSetting {
       version: string
