@@ -1,5 +1,6 @@
 import AVFoundation
 import MediaToolbox
+import Accelerate
 
 let lxSoundEffectConfigNotification = Notification.Name("LXSoundEffectConfigDidChangeNotification")
 let lxSoundEffectBandFrequencies: [Float] = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
@@ -21,28 +22,6 @@ private struct LXBiquadCoefficients {
 private struct LXBiquadState {
     var z1: Float = 0
     var z2: Float = 0
-}
-
-private struct LXDelayLine {
-    var buffer: [Float]
-    var writeIndex = 0
-    var dampingStore: Float = 0
-
-    init(size: Int) {
-        buffer = Array(repeating: 0, count: max(size, 1))
-    }
-
-    mutating func process(input: Float, feedback: Float, damping: Float) -> Float {
-        let delayed = buffer[writeIndex]
-        dampingStore += damping * (delayed - dampingStore)
-        let filtered = dampingStore
-        buffer[writeIndex] = input + filtered * feedback
-        writeIndex += 1
-        if writeIndex >= buffer.count {
-            writeIndex = 0
-        }
-        return filtered
-    }
 }
 
 private struct LXPitchShifterState {
@@ -123,45 +102,6 @@ private struct LXPitchShifterState {
     }
 }
 
-private struct LXConvolutionPreset {
-    let delayTimes: [Float]
-    let feedbacks: [Float]
-    let damping: Float
-
-    static func preset(for fileName: String) -> LXConvolutionPreset? {
-        switch fileName {
-        case "filter-telephone.wav":
-            return LXConvolutionPreset(delayTimes: [0.010, 0.016], feedbacks: [0.22, 0.18], damping: 0.55)
-        case "s2_r4_bd.wav":
-            return LXConvolutionPreset(delayTimes: [0.070, 0.110, 0.170], feedbacks: [0.74, 0.70, 0.66], damping: 0.18)
-        case "bright-hall.wav":
-            return LXConvolutionPreset(delayTimes: [0.050, 0.085, 0.125], feedbacks: [0.60, 0.56, 0.50], damping: 0.24)
-        case "cinema-diningroom.wav":
-            return LXConvolutionPreset(delayTimes: [0.042, 0.072, 0.108], feedbacks: [0.54, 0.50, 0.46], damping: 0.26)
-        case "dining-living-true-stereo.wav":
-            return LXConvolutionPreset(delayTimes: [0.032, 0.058, 0.088], feedbacks: [0.46, 0.42, 0.38], damping: 0.30)
-        case "living-bedroom-leveled.wav":
-            return LXConvolutionPreset(delayTimes: [0.028, 0.048, 0.076], feedbacks: [0.42, 0.38, 0.34], damping: 0.34)
-        case "spreader50-65ms.wav":
-            return LXConvolutionPreset(delayTimes: [0.024, 0.050, 0.065], feedbacks: [0.35, 0.30, 0.25], damping: 0.28)
-        case "s3_r1_bd.wav":
-            return LXConvolutionPreset(delayTimes: [0.020, 0.040, 0.060], feedbacks: [0.38, 0.34, 0.30], damping: 0.33)
-        case "matrix-reverb1.wav":
-            return LXConvolutionPreset(delayTimes: [0.036, 0.063, 0.096], feedbacks: [0.48, 0.44, 0.40], damping: 0.27)
-        case "matrix-reverb2.wav":
-            return LXConvolutionPreset(delayTimes: [0.032, 0.058, 0.090], feedbacks: [0.45, 0.41, 0.37], damping: 0.28)
-        case "cardiod-35-10-spread.wav":
-            return LXConvolutionPreset(delayTimes: [0.018, 0.036, 0.072], feedbacks: [0.34, 0.30, 0.26], damping: 0.32)
-        case "tim-omni-35-10-magnetic.wav":
-            return LXConvolutionPreset(delayTimes: [0.014, 0.024, 0.046], feedbacks: [0.28, 0.24, 0.20], damping: 0.36)
-        case "feedback-spring.wav":
-            return LXConvolutionPreset(delayTimes: [0.030, 0.054, 0.090], feedbacks: [0.52, 0.48, 0.44], damping: 0.22)
-        default:
-            return nil
-        }
-    }
-}
-
 struct LXSoundEffectConfiguration {
     var equalizerEnabled = false
     var gains = LXEqualizerAudioMixController.normalizeGains([])
@@ -236,8 +176,7 @@ final class LXEqualizerAudioMixController {
     private var config = LXSoundEffectConfiguration()
     private var coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
     private var eqStates: [[LXBiquadState]] = []
-    private var convolutionPreset: LXConvolutionPreset?
-    private var convolutionStates: [[LXDelayLine]] = []
+    private var convolutionEngine: LXConvolutionEngine?
     private var pitchStates: [LXPitchShifterState] = []
     private var sampleRate: Double = 0
     private var channelsPerFrame = 0
@@ -355,7 +294,7 @@ final class LXEqualizerAudioMixController {
         isInterleaved = false
         processedSamples = 0
         eqStates.removeAll(keepingCapacity: false)
-        convolutionStates.removeAll(keepingCapacity: false)
+        convolutionEngine = nil
         pitchStates.removeAll(keepingCapacity: false)
         coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
     }
@@ -369,17 +308,13 @@ final class LXEqualizerAudioMixController {
             count: channelsPerFrame
         )
 
-        convolutionPreset = LXConvolutionPreset.preset(for: config.convolutionFileName)
-        if let preset = convolutionPreset {
-            convolutionStates = (0..<channelsPerFrame).map { _ in
-                preset.delayTimes.map { delayTime in
-                    let lineSize = max(Int(sampleRate * Double(delayTime)), 1)
-                    return LXDelayLine(size: lineSize)
-                }
-            }
-        } else {
-            convolutionStates = []
-        }
+        convolutionEngine = config.hasConvolution
+            ? LXConvolutionEngine(
+                config: config,
+                sampleRate: sampleRate,
+                channelCount: channelsPerFrame
+            )
+            : nil
 
         let pitchWindow = Self.pitchWindowSize(sampleRate: sampleRate)
         pitchStates = Array(repeating: LXPitchShifterState(windowSize: pitchWindow), count: channelsPerFrame)
@@ -541,9 +476,10 @@ final class LXEqualizerAudioMixController {
         for channel in 0..<activeChannels {
             var output = processEqualizer(samples[channel], channel: channel)
             output = processPitch(output, channel: channel)
-            output = processConvolution(output, channel: channel)
             samples[channel] = max(min(output, 1), -1)
         }
+
+        processConvolution(&samples, activeChannels: activeChannels)
 
         applyPanner(to: &samples, activeChannels: activeChannels)
         processedSamples += 1
@@ -575,26 +511,17 @@ final class LXEqualizerAudioMixController {
         return output
     }
 
-    private func processConvolution(_ sample: Float, channel: Int) -> Float {
-        guard config.hasConvolution,
-              let preset = convolutionPreset,
-              channel < convolutionStates.count else { return sample }
-
-        let dryGain = config.convolutionMainGain / 10
-        let wetGain = config.convolutionSendGain / 10
-        if wetGain <= 0.0001 {
-            return sample * dryGain
+    private func processConvolution(_ samples: inout [Float], activeChannels: Int) {
+        guard let engine = convolutionEngine else {
+            let dryGain = config.hasConvolution ? (config.convolutionMainGain / 10) : 1
+            if dryGain != 1 {
+                for channel in 0..<activeChannels {
+                    samples[channel] *= dryGain
+                }
+            }
+            return
         }
-
-        var wet: Float = 0
-        for index in convolutionStates[channel].indices {
-            let feedback = preset.feedbacks[min(index, preset.feedbacks.count - 1)]
-            var delayLine = convolutionStates[channel][index]
-            wet += delayLine.process(input: sample, feedback: feedback, damping: preset.damping)
-            convolutionStates[channel][index] = delayLine
-        }
-        wet /= Float(max(convolutionStates[channel].count, 1))
-        return sample * dryGain + wet * wetGain
+        engine.processFrame(&samples, activeChannels: activeChannels)
     }
 
     private func applyPanner(to samples: inout [Float], activeChannels: Int) {
@@ -653,5 +580,362 @@ final class LXEqualizerAudioMixController {
                 a2: a2 / a0
             )
         }
+    }
+}
+
+private final class LXFFTConvolution {
+    private let blockSize: Int
+    private let fftSize: Int
+    private let partitionCount: Int
+    private let inputChannels: Int
+    private let outputChannels: Int
+    private var filterReal: [[[Float]]]
+    private var filterImag: [[[Float]]]
+    private var historyReal: [[[Float]]]
+    private var historyImag: [[[Float]]]
+    private var overlaps: [[Float]]
+    private let fftSetup: FFTSetup
+    private let log2n: vDSP_Length
+
+    init?(irChannels: [[Float]], inputChannels: Int, outputChannels: Int, blockSize: Int = 512) {
+        guard !irChannels.isEmpty else { return nil }
+
+        self.blockSize = blockSize
+        self.fftSize = blockSize * 2
+        self.inputChannels = max(1, inputChannels)
+        self.outputChannels = max(1, outputChannels)
+
+        let impulseLength = irChannels.map(\.count).max() ?? 0
+        guard impulseLength > 0 else { return nil }
+        self.partitionCount = max(1, Int(ceil(Double(impulseLength) / Double(blockSize))))
+
+        let log2Value = Int(log2(Double(fftSize)))
+        guard (1 << log2Value) == fftSize else { return nil }
+        self.log2n = vDSP_Length(log2Value)
+        guard let setup = vDSP_create_fftsetup(self.log2n, FFTRadix(kFFTRadix2)) else { return nil }
+        self.fftSetup = setup
+
+        let routeCount = self.inputChannels * self.outputChannels
+        self.filterReal = Array(
+            repeating: Array(repeating: Array(repeating: 0, count: fftSize), count: partitionCount),
+            count: routeCount
+        )
+        self.filterImag = Array(
+            repeating: Array(repeating: Array(repeating: 0, count: fftSize), count: partitionCount),
+            count: routeCount
+        )
+        self.historyReal = Array(
+            repeating: Array(repeating: Array(repeating: 0, count: fftSize), count: partitionCount),
+            count: self.inputChannels
+        )
+        self.historyImag = Array(
+            repeating: Array(repeating: Array(repeating: 0, count: fftSize), count: partitionCount),
+            count: self.inputChannels
+        )
+        self.overlaps = Array(repeating: Array(repeating: 0, count: blockSize), count: self.outputChannels)
+
+        let routeMapping = Self.makeRouteMapping(irChannelCount: irChannels.count, inputChannels: self.inputChannels, outputChannels: self.outputChannels)
+        for route in routeMapping {
+            let impulse = irChannels[min(route.irChannel, irChannels.count - 1)]
+            for partition in 0..<partitionCount {
+                let start = partition * blockSize
+                let end = min(start + blockSize, impulse.count)
+                var real = Array(repeating: Float(0), count: fftSize)
+                if start < end {
+                    real.replaceSubrange(0..<(end - start), with: impulse[start..<end])
+                }
+                var imag = Array(repeating: Float(0), count: fftSize)
+                Self.performFFT(setup: setup, log2n: self.log2n, real: &real, imag: &imag, direction: FFTDirection(FFT_FORWARD))
+                filterReal[route.routeIndex][partition] = real
+                filterImag[route.routeIndex][partition] = imag
+            }
+        }
+    }
+
+    deinit {
+        vDSP_destroy_fftsetup(fftSetup)
+    }
+
+    func processBlock(_ inputBlock: [[Float]]) -> [[Float]] {
+        guard !inputBlock.isEmpty else { return Array(repeating: Array(repeating: 0, count: blockSize), count: outputChannels) }
+
+        let historyIndex = 0
+        for channel in 0..<inputChannels {
+            let source = channel < inputBlock.count ? inputBlock[channel] : Array(repeating: 0, count: blockSize)
+            var real = Array(repeating: Float(0), count: fftSize)
+            real.replaceSubrange(0..<min(source.count, blockSize), with: source.prefix(blockSize))
+            var imag = Array(repeating: Float(0), count: fftSize)
+            Self.performFFT(setup: fftSetup, log2n: log2n, real: &real, imag: &imag, direction: FFTDirection(FFT_FORWARD))
+            historyReal[channel].insert(real, at: historyIndex)
+            historyImag[channel].insert(imag, at: historyIndex)
+            if historyReal[channel].count > partitionCount {
+                historyReal[channel].removeLast()
+                historyImag[channel].removeLast()
+            }
+        }
+
+        var outputs = Array(repeating: Array(repeating: Float(0), count: blockSize), count: outputChannels)
+        for outputChannel in 0..<outputChannels {
+            var sumReal = Array(repeating: Float(0), count: fftSize)
+            var sumImag = Array(repeating: Float(0), count: fftSize)
+
+            for inputChannel in 0..<inputChannels {
+                let routeIndex = outputChannel * inputChannels + inputChannel
+                for partition in 0..<partitionCount {
+                    let inputReal = historyReal[inputChannel][partition]
+                    let inputImag = historyImag[inputChannel][partition]
+                    let filterRealPart = filterReal[routeIndex][partition]
+                    let filterImagPart = filterImag[routeIndex][partition]
+                    for index in 0..<fftSize {
+                        let real = filterRealPart[index] * inputReal[index] - filterImagPart[index] * inputImag[index]
+                        let imag = filterRealPart[index] * inputImag[index] + filterImagPart[index] * inputReal[index]
+                        sumReal[index] += real
+                        sumImag[index] += imag
+                    }
+                }
+            }
+
+            Self.performFFT(setup: fftSetup, log2n: log2n, real: &sumReal, imag: &sumImag, direction: FFTDirection(FFT_INVERSE))
+            let scale = 1 / Float(fftSize)
+            for index in 0..<fftSize {
+                sumReal[index] *= scale
+            }
+
+            for index in 0..<blockSize {
+                outputs[outputChannel][index] = sumReal[index] + overlaps[outputChannel][index]
+            }
+            overlaps[outputChannel] = Array(sumReal[blockSize..<fftSize])
+        }
+        return outputs
+    }
+
+    private static func makeRouteMapping(irChannelCount: Int, inputChannels: Int, outputChannels: Int) -> [(routeIndex: Int, irChannel: Int)] {
+        if inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 4 {
+            return [
+                (0 * inputChannels + 0, 0),
+                (0 * inputChannels + 1, 2),
+                (1 * inputChannels + 0, 1),
+                (1 * inputChannels + 1, 3),
+            ]
+        }
+
+        if outputChannels >= 2 && irChannelCount >= 2 && inputChannels == 1 {
+            return [
+                (0, 0),
+                (1, 1),
+            ]
+        }
+
+        if inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 2 {
+            return [
+                (0 * inputChannels + 0, 0),
+                (1 * inputChannels + 1, 1),
+            ]
+        }
+
+        if inputChannels >= 2 && outputChannels >= 2 {
+            return [
+                (0 * inputChannels + 0, 0),
+                (1 * inputChannels + 1, 0),
+            ]
+        }
+
+        return [
+            (0, 0),
+        ]
+    }
+
+    private static func performFFT(setup: FFTSetup, log2n: vDSP_Length, real: inout [Float], imag: inout [Float], direction: FFTDirection) {
+        real.withUnsafeMutableBufferPointer { realPointer in
+            imag.withUnsafeMutableBufferPointer { imagPointer in
+                var splitComplex = DSPSplitComplex(realp: realPointer.baseAddress!, imagp: imagPointer.baseAddress!)
+                vDSP_fft_zip(setup, &splitComplex, 1, log2n, direction)
+            }
+        }
+    }
+}
+
+private final class LXConvolutionEngine {
+    private let channelCount: Int
+    private let outputChannels: Int
+    private let blockSize: Int
+    private let dryGain: Float
+    private let wetGain: Float
+    private let convolution: LXFFTConvolution?
+    private var inputBuffer: [[Float]]
+    private var inputFill = 0
+    private var outputQueue: [[Float]]
+    private var outputReadIndex = 0
+
+    init?(config: LXSoundEffectConfiguration, sampleRate: Double, channelCount: Int) {
+        let effectiveChannels = max(1, min(channelCount, 2))
+        guard let response = Self.loadImpulseResponse(
+            assetUri: config.convolutionAssetUri,
+            fileName: config.convolutionFileName,
+            sampleRate: sampleRate
+        ) else { return nil }
+
+        self.channelCount = effectiveChannels
+        self.outputChannels = max(1, min(effectiveChannels, 2))
+        self.blockSize = 512
+        self.dryGain = config.convolutionMainGain / 10
+        self.wetGain = config.convolutionSendGain / 10
+        self.convolution = LXFFTConvolution(
+            irChannels: response,
+            inputChannels: effectiveChannels,
+            outputChannels: self.outputChannels,
+            blockSize: self.blockSize
+        )
+        self.inputBuffer = Array(repeating: Array(repeating: 0, count: self.blockSize), count: effectiveChannels)
+        self.outputQueue = Array(repeating: [], count: self.outputChannels)
+    }
+
+    func processFrame(_ samples: inout [Float], activeChannels: Int) {
+        let usedChannels = min(activeChannels, channelCount)
+        guard usedChannels > 0 else { return }
+
+        for channel in 0..<usedChannels {
+            inputBuffer[channel][inputFill] = samples[channel]
+        }
+        inputFill += 1
+        if inputFill >= blockSize {
+            processBufferedBlock()
+            inputFill = 0
+        }
+
+        if outputReadIndex < outputQueue[0].count {
+            for channel in 0..<usedChannels {
+                let wet = channel < outputChannels ? outputQueue[channel][outputReadIndex] : 0
+                samples[channel] = wet
+            }
+            outputReadIndex += 1
+            if outputReadIndex >= outputQueue[0].count {
+                outputQueue = Array(repeating: [], count: outputChannels)
+                outputReadIndex = 0
+            }
+        } else {
+            for channel in 0..<usedChannels {
+                samples[channel] = 0
+            }
+        }
+    }
+
+    private func processBufferedBlock() {
+        let dryBlock = inputBuffer
+        let wetBlock = convolution?.processBlock(inputBuffer) ?? Array(repeating: Array(repeating: 0, count: blockSize), count: outputChannels)
+        outputQueue = Array(repeating: Array(repeating: 0, count: blockSize), count: outputChannels)
+        outputReadIndex = 0
+
+        for channel in 0..<outputChannels {
+            for index in 0..<blockSize {
+                let dry = channel < dryBlock.count ? dryBlock[channel][index] * dryGain : 0
+                let wet = wetBlock[channel][index] * wetGain
+                outputQueue[channel][index] = max(min(dry + wet, 1), -1)
+            }
+        }
+    }
+
+    private static func loadImpulseResponse(assetUri: String, fileName: String, sampleRate: Double) -> [[Float]]? {
+        guard let url = resolveAssetURL(assetUri: assetUri, fileName: fileName) else { return nil }
+        guard let audioFile = try? AVAudioFile(forReading: url) else { return nil }
+
+        let frameCapacity = AVAudioFrameCount(audioFile.length)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: frameCapacity) else { return nil }
+        do {
+            try audioFile.read(into: buffer)
+        } catch {
+            return nil
+        }
+
+        guard let floatChannelData = buffer.floatChannelData else { return nil }
+        let frameLength = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameLength > 0, channelCount > 0 else { return nil }
+
+        var channels = (0..<channelCount).map { channel in
+            Array(UnsafeBufferPointer(start: floatChannelData[channel], count: frameLength))
+        }
+        if abs(buffer.format.sampleRate - sampleRate) > 1 {
+            channels = channels.map { resample($0, from: buffer.format.sampleRate, to: sampleRate) }
+        }
+
+        let normalizationScale = calculateNormalizationScale(channels: channels, sampleRate: sampleRate)
+        if normalizationScale != 1 {
+            channels = channels.map { channel in channel.map { $0 * normalizationScale } }
+        }
+        return channels
+    }
+
+    private static func resolveAssetURL(assetUri: String, fileName: String) -> URL? {
+        if let url = URL(string: assetUri), url.scheme != nil {
+            return url
+        }
+        if assetUri.hasPrefix("/") {
+            return URL(fileURLWithPath: assetUri)
+        }
+
+        let nsFileName = fileName as NSString
+        let resource = nsFileName.deletingPathExtension
+        let ext = nsFileName.pathExtension.isEmpty ? nil : nsFileName.pathExtension
+        if let bundleURL = Bundle.main.url(forResource: resource, withExtension: ext) {
+            return bundleURL
+        }
+        return nil
+    }
+
+    private static func resample(_ input: [Float], from inputSampleRate: Double, to outputSampleRate: Double) -> [Float] {
+        guard !input.isEmpty, inputSampleRate > 0, outputSampleRate > 0, abs(inputSampleRate - outputSampleRate) > 0.5 else {
+            return input
+        }
+
+        let ratio = outputSampleRate / inputSampleRate
+        let outputLength = max(1, Int(round(Double(input.count) * ratio)))
+        if outputLength == input.count {
+            return input
+        }
+
+        var output = Array(repeating: Float(0), count: outputLength)
+        let maxIndex = input.count - 1
+        for index in 0..<outputLength {
+            let position = Double(index) / ratio
+            let lower = max(0, min(Int(floor(position)), maxIndex))
+            let upper = max(0, min(lower + 1, maxIndex))
+            let fraction = Float(position - Double(lower))
+            if lower == upper {
+                output[index] = input[lower]
+            } else {
+                output[index] = input[lower] * (1 - fraction) + input[upper] * fraction
+            }
+        }
+        return output
+    }
+
+    private static func calculateNormalizationScale(channels: [[Float]], sampleRate: Double) -> Float {
+        let gainCalibration: Float = 0.00125
+        let gainCalibrationSampleRate: Float = 44100
+        let minPower: Float = 0.000125
+        let numberOfChannels = channels.count
+        let length = channels.map(\.count).max() ?? 0
+        guard numberOfChannels > 0, length > 0 else { return 1 }
+
+        var power: Float = 0
+        for channel in channels {
+            var channelPower: Float = 0
+            for sample in channel {
+                channelPower += sample * sample
+            }
+            power += channelPower
+        }
+        power = sqrt(power / Float(numberOfChannels * length))
+        if !power.isFinite || power.isNaN || power < minPower {
+            power = minPower
+        }
+
+        var scale = (1 / power) * gainCalibration
+        scale *= gainCalibrationSampleRate / Float(sampleRate)
+        if numberOfChannels == 4 {
+            scale *= 0.5
+        }
+        return scale
     }
 }
