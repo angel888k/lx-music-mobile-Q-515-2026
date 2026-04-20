@@ -92,7 +92,7 @@ final class LXEqualizerAudioMixController {
             process: { tap, numberFrames, _, bufferListInOut, numberFramesOut, flagsOut in
                 guard let storage = MTAudioProcessingTapGetStorage(tap) else {
                     numberFramesOut.pointee = 0
-                    flagsOut.pointee = []
+                    flagsOut.pointee = 0
                     return
                 }
                 let processor = Unmanaged<LXEqualizerAudioMixController>.fromOpaque(storage).takeUnretainedValue()
@@ -105,7 +105,7 @@ final class LXEqualizerAudioMixController {
                 )
                 if status != noErr {
                     numberFramesOut.pointee = 0
-                    flagsOut.pointee = []
+                    flagsOut.pointee = 0
                 }
             }
         )
