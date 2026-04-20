@@ -26,7 +26,7 @@ export default forwardRef<SoundEffectPopupType, Omit<PopupProps, 'children'>>((p
   }))
 
   return visible ? (
-    <Popup ref={popupRef} title={t('setting_play_sound_effect')} {...props}>
+    <Popup ref={popupRef} title={t('setting_play_sound_effect')} closeBtn={false} {...props}>
       <ScrollView>
         <View onStartShouldSetResponder={() => true}>
           <SoundEffectControl showTip={false} />
