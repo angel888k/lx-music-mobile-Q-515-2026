@@ -103,7 +103,8 @@ private final class LXPhaseVocoderPitchShifter {
 
     private func processHop(pitchFactor: Float, usedChannels: Int) {
         for channel in 0..<usedChannels {
-            channels[channel].inputBuffer.copyWithin(0..<(blockSize - hopSize), from: hopSize..<blockSize)
+            let shiftedInput = Array(channels[channel].inputBuffer[hopSize..<blockSize])
+            channels[channel].inputBuffer.replaceSubrange(0..<(blockSize - hopSize), with: shiftedInput)
             channels[channel].inputBuffer.replaceSubrange((blockSize - hopSize)..<blockSize, with: channels[channel].hopInput)
 
             var windowedInput = channels[channel].inputBuffer
@@ -126,7 +127,8 @@ private final class LXPhaseVocoderPitchShifter {
                 channels[channel].outputBuffer[index] += timeDomain[index] / overlapCount
             }
             channels[channel].outputQueue = Array(channels[channel].outputBuffer[0..<hopSize])
-            channels[channel].outputBuffer.copyWithin(0..<(blockSize - hopSize), from: hopSize..<blockSize)
+            let shiftedOutput = Array(channels[channel].outputBuffer[hopSize..<blockSize])
+            channels[channel].outputBuffer.replaceSubrange(0..<(blockSize - hopSize), with: shiftedOutput)
             channels[channel].outputBuffer.replaceSubrange((blockSize - hopSize)..<blockSize, with: repeatElement(Float(0), count: hopSize))
         }
     }
