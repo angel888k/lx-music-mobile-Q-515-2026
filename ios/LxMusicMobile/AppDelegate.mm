@@ -1273,13 +1273,12 @@ RCT_EXPORT_MODULE();
                             dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interval * NSEC_PER_SEC)),
                             (uint64_t)(interval * NSEC_PER_SEC),
                             (uint64_t)(0.01 * NSEC_PER_SEC));
-  __weak typeof(self) weakSelf = self;
+  StreamingFlacPlayerModule *module = self;
   dispatch_source_set_event_handler(timer, ^{
-    __strong typeof(weakSelf) strongSelf = weakSelf;
-    if (strongSelf == nil || strongSelf.soundEffectMixerNode == nil) return;
-    strongSelf.pannerPhase += (float)(M_PI / 18.0);
-    if (strongSelf.pannerPhase > (float)(M_PI * 2.0)) strongSelf.pannerPhase -= (float)(M_PI * 2.0);
-    strongSelf.soundEffectMixerNode.pan = sinf(strongSelf.pannerPhase) * amplitude;
+    if (module == nil || module.soundEffectMixerNode == nil) return;
+    module.pannerPhase += (float)(M_PI / 18.0);
+    if (module.pannerPhase > (float)(M_PI * 2.0)) module.pannerPhase -= (float)(M_PI * 2.0);
+    module.soundEffectMixerNode.pan = sinf(module.pannerPhase) * amplitude;
   });
   dispatch_resume(timer);
 }
