@@ -89,31 +89,35 @@ def lx_patch_swift_audio_seek(installer)
 end
 
 def lx_patch_swift_audio_player_access(installer)
-  audio_player_path = Dir.glob(File.join(installer.sandbox.root.to_s, '**', 'AudioPlayer.swift'))
+  queued_player_path = Dir.glob(File.join(installer.sandbox.root.to_s, '**', 'QueuedAudioPlayer.swift'))
     .find { |file| file.include?('SwiftAudioEx') || file.include?('SwiftAudio') }
 
-  unless audio_player_path
-    Pod::UI.puts 'Skip SwiftAudio AudioPlayer patch: AudioPlayer.swift not found'.yellow
+  unless queued_player_path
+    Pod::UI.puts 'Skip SwiftAudio queued player patch: QueuedAudioPlayer.swift not found'.yellow
     return
   end
 
-  anchor = 'public var playerState: AudioPlayerState { wrapper.state }'
-  insertion = <<~'SWIFT'
-    public var playerState: AudioPlayerState { wrapper.state }
-    public var currentPlayerItem: AVPlayerItem? { wrapper.currentItem }
+  source = File.binread(queued_player_path)
+  source = source.sub("import Foundation\nimport MediaPlayer", "import Foundation\nimport AVFoundation\nimport MediaPlayer") unless source.include?("import AVFoundation")
+
+  insertion = <<~'SWIFT'.strip
+    public var currentPlayerItem: AVPlayerItem? {
+        return wrapper.currentItem
+    }
   SWIFT
 
-  source = File.binread(audio_player_path)
   return if source.include?(insertion.strip)
 
-  patched = source.sub(anchor, insertion.strip)
+  patched = source.sub(/public var currentIndex: Int \{\s*(?:return )?[A-Za-z_][A-Za-z0-9_]*\.currentIndex\s*\}/m) do |match|
+    "#{match}\n\n#{insertion.strip}"
+  end
   if patched == source
-    Pod::UI.puts "Skip SwiftAudio AudioPlayer patch: anchor not found in #{audio_player_path}".yellow
+    Pod::UI.puts "Skip SwiftAudio queued player patch: anchor not found in #{queued_player_path}".yellow
     return
   end
 
-  File.binwrite(audio_player_path, patched)
-  Pod::UI.puts "Patched SwiftAudio AudioPlayer access: #{audio_player_path}".green
+  File.binwrite(queued_player_path, patched)
+  Pod::UI.puts "Patched SwiftAudio queued player access: #{queued_player_path}".green
 end
 
 target 'LxMusicMobile' do
