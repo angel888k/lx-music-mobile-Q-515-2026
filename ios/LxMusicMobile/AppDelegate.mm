@@ -7,9 +7,13 @@
 #import <ReactNativeNavigation/ReactNativeNavigation.h>
 #import <Security/Security.h>
 #import <AVFoundation/AVFoundation.h>
+#import <Accelerate/Accelerate.h>
 #import <MediaPlayer/MediaPlayer.h>
 #import <JavaScriptCore/JavaScriptCore.h>
 #import <math.h>
+#include <algorithm>
+#include <utility>
+#include <vector>
 
 #if __has_include(<FLAC/stream_decoder.h>)
 #import <FLAC/stream_decoder.h>
@@ -934,6 +938,371 @@ static float LXSoundEffectPitchFactorToCents(float pitchFactor) {
   return 1200.0f * log2f(pitchFactor);
 }
 
+static uint16_t LXReadLE16(const uint8_t *bytes) {
+  return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
+}
+
+static uint32_t LXReadLE32(const uint8_t *bytes) {
+  return (uint32_t)bytes[0] |
+    ((uint32_t)bytes[1] << 8) |
+    ((uint32_t)bytes[2] << 16) |
+    ((uint32_t)bytes[3] << 24);
+}
+
+static NSURL *LXSoundEffectResolveAssetURL(NSString *assetUri, NSString *fileName) {
+  if ([assetUri isKindOfClass:[NSString class]] && assetUri.length) {
+    NSURL *url = [NSURL URLWithString:assetUri];
+    if (url != nil && url.scheme.length) return url;
+    if ([assetUri hasPrefix:@"/"]) return [NSURL fileURLWithPath:assetUri];
+  }
+
+  if (![fileName isKindOfClass:[NSString class]] || !fileName.length) return nil;
+  NSString *resource = [fileName stringByDeletingPathExtension];
+  NSString *ext = [fileName pathExtension];
+  return [NSBundle.mainBundle URLForResource:resource withExtension:ext.length ? ext : nil];
+}
+
+struct LXImpulseResponseData {
+  double sampleRate = 0;
+  std::vector<std::vector<float>> channels;
+};
+
+static std::vector<float> LXResampleLinear(const std::vector<float> &input, double inputSampleRate, double outputSampleRate) {
+  if (input.empty() || inputSampleRate <= 0 || outputSampleRate <= 0 || fabs(inputSampleRate - outputSampleRate) <= 0.5) return input;
+
+  double ratio = outputSampleRate / inputSampleRate;
+  size_t outputLength = std::max<size_t>(1, (size_t)llround((double)input.size() * ratio));
+  if (outputLength == input.size()) return input;
+
+  std::vector<float> output(outputLength, 0);
+  size_t maxIndex = input.size() - 1;
+  for (size_t index = 0; index < outputLength; index++) {
+    double position = (double)index / ratio;
+    size_t lower = std::min<size_t>((size_t)floor(position), maxIndex);
+    size_t upper = std::min<size_t>(lower + 1, maxIndex);
+    float fraction = (float)(position - (double)lower);
+    output[index] = lower == upper
+      ? input[lower]
+      : input[lower] * (1.0f - fraction) + input[upper] * fraction;
+  }
+  return output;
+}
+
+static float LXCalculateImpulseNormalizationScale(const std::vector<std::vector<float>> &channels, double sampleRate) {
+  const float gainCalibration = 0.00125f;
+  const float gainCalibrationSampleRate = 44100.0f;
+  const float minPower = 0.000125f;
+  if (channels.empty()) return 1.0f;
+
+  size_t channelCount = channels.size();
+  size_t length = 0;
+  for (const auto &channel : channels) {
+    length = std::max(length, channel.size());
+  }
+  if (!length) return 1.0f;
+
+  double power = 0;
+  for (const auto &channel : channels) {
+    for (float sample : channel) power += sample * sample;
+  }
+  power = sqrt(power / (double)(channelCount * length));
+  if (!isfinite(power) || power < minPower) power = minPower;
+
+  float scale = (float)((1.0 / power) * gainCalibration);
+  scale *= gainCalibrationSampleRate / (float)sampleRate;
+  if (channelCount == 4) scale *= 0.5f;
+  return scale;
+}
+
+static LXImpulseResponseData LXLoadImpulseResponse(NSURL *url, double targetSampleRate) {
+  LXImpulseResponseData result;
+  if (url == nil) return result;
+
+  NSData *data = [NSData dataWithContentsOfURL:url];
+  if (data.length < 44) return result;
+
+  const uint8_t *bytes = (const uint8_t *)data.bytes;
+  if (memcmp(bytes, "RIFF", 4) != 0 || memcmp(bytes + 8, "WAVE", 4) != 0) return result;
+
+  uint16_t audioFormat = 0;
+  uint16_t channelCount = 0;
+  uint32_t sampleRate = 0;
+  uint16_t bitsPerSample = 0;
+  const uint8_t *pcmData = NULL;
+  uint32_t pcmDataSize = 0;
+
+  NSUInteger offset = 12;
+  while (offset + 8 <= data.length) {
+    const uint8_t *chunk = bytes + offset;
+    uint32_t chunkSize = LXReadLE32(chunk + 4);
+    NSUInteger nextOffset = offset + 8 + chunkSize + (chunkSize & 1u);
+    if (nextOffset > data.length) break;
+
+    if (memcmp(chunk, "fmt ", 4) == 0 && chunkSize >= 16) {
+      audioFormat = LXReadLE16(chunk + 8);
+      channelCount = LXReadLE16(chunk + 10);
+      sampleRate = LXReadLE32(chunk + 12);
+      bitsPerSample = LXReadLE16(chunk + 22);
+    } else if (memcmp(chunk, "data", 4) == 0) {
+      pcmData = chunk + 8;
+      pcmDataSize = chunkSize;
+    }
+    offset = nextOffset;
+  }
+
+  if (audioFormat != 1 || channelCount == 0 || sampleRate == 0 || bitsPerSample != 16 || pcmData == NULL || pcmDataSize == 0) {
+    return result;
+  }
+
+  size_t frameCount = pcmDataSize / (channelCount * sizeof(int16_t));
+  if (!frameCount) return result;
+
+  result.sampleRate = (double)sampleRate;
+  result.channels.assign(channelCount, std::vector<float>(frameCount, 0));
+  const int16_t *samples = (const int16_t *)pcmData;
+  const float scale = (float)INT16_MAX;
+  for (size_t frame = 0; frame < frameCount; frame++) {
+    for (uint16_t channel = 0; channel < channelCount; channel++) {
+      result.channels[channel][frame] = (float)samples[frame * channelCount + channel] / scale;
+    }
+  }
+
+  if (fabs(result.sampleRate - targetSampleRate) > 0.5) {
+    for (auto &channel : result.channels) channel = LXResampleLinear(channel, result.sampleRate, targetSampleRate);
+    result.sampleRate = targetSampleRate;
+  }
+
+  float normalizationScale = LXCalculateImpulseNormalizationScale(result.channels, result.sampleRate);
+  if (normalizationScale != 1.0f) {
+    for (auto &channel : result.channels) {
+      for (float &sample : channel) sample *= normalizationScale;
+    }
+  }
+
+  return result;
+}
+
+@interface LXStreamingConvolutionEngine : NSObject
+- (instancetype)initWithAssetURL:(NSURL *)assetURL
+                       sampleRate:(double)sampleRate
+                    inputChannels:(NSUInteger)inputChannels
+                   outputChannels:(NSUInteger)outputChannels
+                          dryGain:(float)dryGain
+                          wetGain:(float)wetGain;
+- (void)updateDryGain:(float)dryGain wetGain:(float)wetGain;
+- (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels;
+@end
+
+@implementation LXStreamingConvolutionEngine {
+  NSUInteger _blockSize;
+  NSUInteger _fftSize;
+  NSUInteger _partitionCount;
+  NSUInteger _inputChannels;
+  NSUInteger _outputChannels;
+  vDSP_Length _log2n;
+  FFTSetup _fftSetup;
+  std::vector<std::vector<std::vector<float>>> _filterReal;
+  std::vector<std::vector<std::vector<float>>> _filterImag;
+  std::vector<std::vector<std::vector<float>>> _historyReal;
+  std::vector<std::vector<std::vector<float>>> _historyImag;
+  std::vector<std::vector<float>> _overlaps;
+  std::vector<std::vector<float>> _inputBuffer;
+  std::vector<std::vector<float>> _outputQueue;
+  NSUInteger _inputFill;
+  NSUInteger _outputReadIndex;
+  float _dryGain;
+  float _wetGain;
+}
+
++ (std::vector<std::pair<NSUInteger, NSUInteger>>)routeMappingWithIRChannelCount:(NSUInteger)irChannelCount inputChannels:(NSUInteger)inputChannels outputChannels:(NSUInteger)outputChannels {
+  if (inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 4) {
+    return {
+      { 0 * inputChannels + 0, 0 },
+      { 0 * inputChannels + 1, 2 },
+      { 1 * inputChannels + 0, 1 },
+      { 1 * inputChannels + 1, 3 },
+    };
+  }
+  if (outputChannels >= 2 && irChannelCount >= 2 && inputChannels == 1) {
+    return { { 0, 0 }, { 1, 1 } };
+  }
+  if (inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 2) {
+    return {
+      { 0 * inputChannels + 0, 0 },
+      { 1 * inputChannels + 1, 1 },
+    };
+  }
+  if (inputChannels >= 2 && outputChannels >= 2) {
+    return {
+      { 0 * inputChannels + 0, 0 },
+      { 1 * inputChannels + 1, 0 },
+    };
+  }
+  return { { 0, 0 } };
+}
+
++ (void)performFFTWithSetup:(FFTSetup)setup log2n:(vDSP_Length)log2n real:(std::vector<float> &)real imag:(std::vector<float> &)imag direction:(FFTDirection)direction {
+  DSPSplitComplex split = {
+    .realp = real.data(),
+    .imagp = imag.data(),
+  };
+  vDSP_fft_zip(setup, &split, 1, log2n, direction);
+}
+
+- (instancetype)initWithAssetURL:(NSURL *)assetURL
+                       sampleRate:(double)sampleRate
+                    inputChannels:(NSUInteger)inputChannels
+                   outputChannels:(NSUInteger)outputChannels
+                          dryGain:(float)dryGain
+                          wetGain:(float)wetGain {
+  self = [super init];
+  if (self == nil) return nil;
+
+  LXImpulseResponseData impulse = LXLoadImpulseResponse(assetURL, sampleRate);
+  if (impulse.channels.empty()) return nil;
+
+  _blockSize = 512;
+  _fftSize = _blockSize * 2;
+  _inputChannels = MAX((NSUInteger)1, inputChannels);
+  _outputChannels = MAX((NSUInteger)1, outputChannels);
+  _dryGain = dryGain;
+  _wetGain = wetGain;
+  _inputFill = 0;
+  _outputReadIndex = 0;
+
+  size_t impulseLength = 0;
+  for (const auto &channel : impulse.channels) impulseLength = std::max(impulseLength, channel.size());
+  _partitionCount = MAX((NSUInteger)1, (NSUInteger)ceil((double)impulseLength / (double)_blockSize));
+
+  NSUInteger log2Value = (NSUInteger)llround(log2((double)_fftSize));
+  if (((NSUInteger)1 << log2Value) != _fftSize) return nil;
+  _log2n = (vDSP_Length)log2Value;
+  _fftSetup = vDSP_create_fftsetup(_log2n, FFTRadix(kFFTRadix2));
+  if (_fftSetup == NULL) return nil;
+
+  NSUInteger routeCount = _inputChannels * _outputChannels;
+  _filterReal.assign(routeCount, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+  _filterImag.assign(routeCount, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+  _historyReal.assign(_inputChannels, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+  _historyImag.assign(_inputChannels, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+  _overlaps.assign(_outputChannels, std::vector<float>(_blockSize, 0));
+  _inputBuffer.assign(_inputChannels, std::vector<float>(_blockSize, 0));
+  _outputQueue.assign(_outputChannels, std::vector<float>());
+
+  auto routeMapping = [LXStreamingConvolutionEngine routeMappingWithIRChannelCount:impulse.channels.size() inputChannels:_inputChannels outputChannels:_outputChannels];
+  for (const auto &route : routeMapping) {
+    const auto &impulseChannel = impulse.channels[std::min((size_t)route.second, impulse.channels.size() - 1)];
+    for (NSUInteger partition = 0; partition < _partitionCount; partition++) {
+      NSUInteger start = partition * _blockSize;
+      NSUInteger end = MIN(start + _blockSize, (NSUInteger)impulseChannel.size());
+      std::vector<float> real(_fftSize, 0);
+      if (start < end) std::copy(impulseChannel.begin() + start, impulseChannel.begin() + end, real.begin());
+      std::vector<float> imag(_fftSize, 0);
+      [LXStreamingConvolutionEngine performFFTWithSetup:_fftSetup log2n:_log2n real:real imag:imag direction:FFTDirection(FFT_FORWARD)];
+      _filterReal[route.first][partition] = std::move(real);
+      _filterImag[route.first][partition] = std::move(imag);
+    }
+  }
+
+  return self;
+}
+
+- (void)dealloc {
+  if (_fftSetup != NULL) vDSP_destroy_fftsetup(_fftSetup);
+}
+
+- (void)updateDryGain:(float)dryGain wetGain:(float)wetGain {
+  _dryGain = dryGain;
+  _wetGain = wetGain;
+}
+
+- (void)processBufferedBlock {
+  std::vector<std::vector<float>> wetOutputs(_outputChannels, std::vector<float>(_blockSize, 0));
+
+  for (NSUInteger inputChannel = 0; inputChannel < _inputChannels; inputChannel++) {
+    std::vector<float> real(_fftSize, 0);
+    std::copy(_inputBuffer[inputChannel].begin(), _inputBuffer[inputChannel].end(), real.begin());
+    std::vector<float> imag(_fftSize, 0);
+    [LXStreamingConvolutionEngine performFFTWithSetup:_fftSetup log2n:_log2n real:real imag:imag direction:FFTDirection(FFT_FORWARD)];
+    _historyReal[inputChannel].insert(_historyReal[inputChannel].begin(), real);
+    _historyImag[inputChannel].insert(_historyImag[inputChannel].begin(), imag);
+    if (_historyReal[inputChannel].size() > _partitionCount) {
+      _historyReal[inputChannel].pop_back();
+      _historyImag[inputChannel].pop_back();
+    }
+  }
+
+  for (NSUInteger outputChannel = 0; outputChannel < _outputChannels; outputChannel++) {
+    std::vector<float> sumReal(_fftSize, 0);
+    std::vector<float> sumImag(_fftSize, 0);
+
+    for (NSUInteger inputChannel = 0; inputChannel < _inputChannels; inputChannel++) {
+      NSUInteger routeIndex = outputChannel * _inputChannels + inputChannel;
+      for (NSUInteger partition = 0; partition < _partitionCount; partition++) {
+        const auto &inputReal = _historyReal[inputChannel][partition];
+        const auto &inputImag = _historyImag[inputChannel][partition];
+        const auto &filterReal = _filterReal[routeIndex][partition];
+        const auto &filterImag = _filterImag[routeIndex][partition];
+        for (NSUInteger index = 0; index < _fftSize; index++) {
+          float real = filterReal[index] * inputReal[index] - filterImag[index] * inputImag[index];
+          float imag = filterReal[index] * inputImag[index] + filterImag[index] * inputReal[index];
+          sumReal[index] += real;
+          sumImag[index] += imag;
+        }
+      }
+    }
+
+    [LXStreamingConvolutionEngine performFFTWithSetup:_fftSetup log2n:_log2n real:sumReal imag:sumImag direction:FFTDirection(FFT_INVERSE)];
+    float scale = 1.0f / (float)_fftSize;
+    for (NSUInteger index = 0; index < _fftSize; index++) sumReal[index] *= scale;
+
+    for (NSUInteger index = 0; index < _blockSize; index++) {
+      wetOutputs[outputChannel][index] = sumReal[index] + _overlaps[outputChannel][index];
+    }
+    _overlaps[outputChannel].assign(sumReal.begin() + _blockSize, sumReal.end());
+  }
+
+  _outputQueue.assign(_outputChannels, std::vector<float>(_blockSize, 0));
+  _outputReadIndex = 0;
+  for (NSUInteger outputChannel = 0; outputChannel < _outputChannels; outputChannel++) {
+    for (NSUInteger index = 0; index < _blockSize; index++) {
+      float dry = outputChannel < _inputBuffer.size() ? _inputBuffer[outputChannel][index] * _dryGain : 0;
+      float wet = wetOutputs[outputChannel][index] * _wetGain;
+      _outputQueue[outputChannel][index] = fmaxf(fminf(dry + wet, 1.0f), -1.0f);
+    }
+  }
+}
+
+- (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels {
+  NSUInteger usedChannels = MIN(activeChannels, _inputChannels);
+  if (usedChannels == 0 || channels == NULL) return;
+
+  for (NSUInteger frame = 0; frame < frameCount; frame++) {
+    for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+      _inputBuffer[channel][_inputFill] = channels[channel][frame];
+    }
+    _inputFill += 1;
+    if (_inputFill >= _blockSize) {
+      [self processBufferedBlock];
+      _inputFill = 0;
+    }
+
+    if (!_outputQueue.empty() && _outputReadIndex < _outputQueue[0].size()) {
+      for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+        channels[channel][frame] = channel < _outputChannels ? _outputQueue[channel][_outputReadIndex] : 0;
+      }
+      _outputReadIndex += 1;
+      if (_outputReadIndex >= _outputQueue[0].size()) {
+        _outputQueue.assign(_outputChannels, std::vector<float>());
+        _outputReadIndex = 0;
+      }
+    } else {
+      for (NSUInteger channel = 0; channel < usedChannels; channel++) channels[channel][frame] = 0;
+    }
+  }
+}
+@end
+
 static AVAudioUnitReverbPreset LXSoundEffectReverbPresetForFileName(NSString *fileName) {
   if ([fileName isEqualToString:@"filter-telephone.wav"]) return AVAudioUnitReverbPresetSmallRoom;
   if ([fileName isEqualToString:@"s2_r4_bd.wav"]) return AVAudioUnitReverbPresetCathedral;
@@ -1045,8 +1414,10 @@ RCT_REMAP_METHOD(updateEqualizerConfig, updateEqualizerConfig:(NSDictionary *)co
 @property (nonatomic, strong) AVAudioMixerNode *dryMixerNode;
 @property (nonatomic, strong) AVAudioMixerNode *wetMixerNode;
 @property (nonatomic, strong) AVAudioMixerNode *soundEffectMixerNode;
+@property (nonatomic, strong) LXStreamingConvolutionEngine *convolutionEngine;
 @property (nonatomic, strong) AVAudioFormat *outputFormat;
 @property (nonatomic, strong) dispatch_source_t pannerTimer;
+@property (nonatomic, copy) NSString *convolutionAssetKey;
 @property (nonatomic, copy) NSString *currentState;
 @property (nonatomic, copy) NSString *currentURL;
 @property (nonatomic, strong) NSError *streamError;
@@ -1236,6 +1607,8 @@ RCT_EXPORT_MODULE();
   self.dryMixerNode = nil;
   self.wetMixerNode = nil;
   self.soundEffectMixerNode = nil;
+  self.convolutionEngine = nil;
+  self.convolutionAssetKey = nil;
   self.pannerTimer = nil;
   self.pannerPhase = 0.0f;
 }
@@ -1283,6 +1656,44 @@ RCT_EXPORT_MODULE();
   dispatch_resume(timer);
 }
 
+- (BOOL)refreshConvolutionEngineLockedWithAssetUri:(NSString *)assetUri fileName:(NSString *)fileName mainGain:(float)mainGain sendGain:(float)sendGain {
+  if (self.sampleRate <= 0 || self.channels == 0 || fileName.length == 0) {
+    self.convolutionEngine = nil;
+    self.convolutionAssetKey = nil;
+    return NO;
+  }
+
+  NSURL *assetURL = LXSoundEffectResolveAssetURL(assetUri, fileName);
+  if (assetURL == nil) {
+    self.convolutionEngine = nil;
+    self.convolutionAssetKey = nil;
+    return NO;
+  }
+
+  NSString *assetKey = assetURL.absoluteString ?: fileName;
+  if (self.convolutionEngine != nil &&
+      [self.convolutionAssetKey isEqualToString:assetKey]) {
+    [self.convolutionEngine updateDryGain:mainGain / 10.0f wetGain:sendGain / 10.0f];
+    return YES;
+  }
+
+  LXStreamingConvolutionEngine *engine = [[LXStreamingConvolutionEngine alloc] initWithAssetURL:assetURL
+                                                                                      sampleRate:self.sampleRate
+                                                                                   inputChannels:self.channels
+                                                                                  outputChannels:MIN(self.channels, 2)
+                                                                                         dryGain:mainGain / 10.0f
+                                                                                         wetGain:sendGain / 10.0f];
+  if (engine == nil) {
+    self.convolutionEngine = nil;
+    self.convolutionAssetKey = nil;
+    return NO;
+  }
+
+  self.convolutionEngine = engine;
+  self.convolutionAssetKey = assetKey;
+  return YES;
+}
+
 - (void)applySoundEffectConfigLocked {
   if (self.equalizerNode == nil) return;
 
@@ -1297,6 +1708,7 @@ RCT_EXPORT_MODULE();
   NSArray<NSNumber *> *frequencies = LXSoundEffectEqualizerFrequencies();
   NSUInteger bandCount = MIN(MIN(gains.count, frequencies.count), self.equalizerNode.bands.count);
   NSString *convolutionFileName = [convolutionConfig[@"fileName"] isKindOfClass:[NSString class]] ? convolutionConfig[@"fileName"] : @"";
+  NSString *convolutionAssetUri = [convolutionConfig[@"assetUri"] isKindOfClass:[NSString class]] ? convolutionConfig[@"assetUri"] : @"";
   float convolutionMainGain = LXSoundEffectClampFloatValue(convolutionConfig[@"mainGain"], 10.0f, 0.0f, 50.0f);
   float convolutionSendGain = LXSoundEffectClampFloatValue(convolutionConfig[@"sendGain"], 0.0f, 0.0f, 50.0f);
   BOOL pannerEnabled = [pannerConfig[@"enabled"] boolValue];
@@ -1304,6 +1716,11 @@ RCT_EXPORT_MODULE();
   float pannerSpeed = LXSoundEffectClampFloatValue(pannerConfig[@"speed"], 25.0f, 1.0f, 50.0f);
   float pitchPlaybackRate = LXSoundEffectClampFloatValue(pitchShifterConfig[@"playbackRate"], 1.0f, 0.5f, 1.5f);
   BOOL hasConvolution = convolutionFileName.length > 0;
+  BOOL usesTrueConvolution = hasConvolution && [self refreshConvolutionEngineLockedWithAssetUri:convolutionAssetUri fileName:convolutionFileName mainGain:convolutionMainGain sendGain:convolutionSendGain];
+  if (!hasConvolution) {
+    self.convolutionEngine = nil;
+    self.convolutionAssetKey = nil;
+  }
 
   self.equalizerNode.globalGain = 0.0f;
   self.equalizerNode.bypass = !enabled;
@@ -1326,11 +1743,11 @@ RCT_EXPORT_MODULE();
 
   if (self.reverbNode != nil) {
     self.reverbNode.wetDryMix = 100.0f;
-    self.reverbNode.bypass = !hasConvolution;
-    if (hasConvolution) [self.reverbNode loadFactoryPreset:LXSoundEffectReverbPresetForFileName(convolutionFileName)];
+    self.reverbNode.bypass = !hasConvolution || usesTrueConvolution;
+    if (hasConvolution && !usesTrueConvolution) [self.reverbNode loadFactoryPreset:LXSoundEffectReverbPresetForFileName(convolutionFileName)];
   }
-  if (self.dryMixerNode != nil) self.dryMixerNode.outputVolume = hasConvolution ? (convolutionMainGain / 10.0f) : 1.0f;
-  if (self.wetMixerNode != nil) self.wetMixerNode.outputVolume = hasConvolution ? (convolutionSendGain / 10.0f) : 0.0f;
+  if (self.dryMixerNode != nil) self.dryMixerNode.outputVolume = usesTrueConvolution ? 1.0f : (hasConvolution ? (convolutionMainGain / 10.0f) : 1.0f);
+  if (self.wetMixerNode != nil) self.wetMixerNode.outputVolume = usesTrueConvolution ? 0.0f : (hasConvolution ? (convolutionSendGain / 10.0f) : 0.0f);
 
   if (pannerEnabled) [self restartPannerLockedWithSoundR:pannerSoundR speed:pannerSpeed];
   else [self stopPannerLocked];
@@ -1623,6 +2040,10 @@ RCT_EXPORT_MODULE();
   __block int64_t generation = 0;
   dispatch_sync(self.renderQueue, ^{
     if (self.playerNode == nil || self.stopRequested) return;
+
+    if (self.convolutionEngine != nil) {
+      [self.convolutionEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels];
+    }
 
     generation = self.playbackGeneration;
     self.queuedFrames += queuedFrameCount;
