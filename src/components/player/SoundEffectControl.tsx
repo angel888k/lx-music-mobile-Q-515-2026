@@ -143,7 +143,7 @@ const EqualizerSection = memo(({
 }) => {
   const t = useI18n()
   const theme = useTheme()
-  const dividerColor = theme['c-primary-alpha-700']
+  const dividerColor = theme['c-primary-alpha-500']
 
   const equalizerRows = useMemo(() => {
     const result: Array<Array<typeof equalizerFrequencies[number]>> = []
@@ -362,7 +362,7 @@ const SurroundSection = memo(({
         <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_surround')}</Text>
         <PlaceholderCheckbox
           checked={enabled}
-          label={t('setting_play_sound_effect_enable')}
+          label={t('setting_play_sound_effect_surround_enable')}
           onPress={onToggle}
         />
       </View>
@@ -396,7 +396,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
 }) => {
   const t = useI18n()
   const theme = useTheme()
-  const dividerColor = theme['c-primary-alpha-700']
+  const dividerColor = theme['c-primary-alpha-500']
   const setting = useSetting()
   const [previewGains, setPreviewGains] = useState<PreviewGains>(() => getEqualizerGains(setting))
   const [selectedConvolutionId, setSelectedConvolutionId] = useState<PlaceholderConvolutionId | null>(null)
@@ -443,35 +443,40 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
   if (layoutMode == 'stacked') {
     return (
       <View style={styles.container}>
-        <EnvironmentSection
-          selectedConvolutionId={selectedConvolutionId}
-          originGain={originGain}
-          effectGain={effectGain}
-          onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
-          onOriginGainChange={setOriginGain}
-          onEffectGainChange={setEffectGain}
-        />
-        <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
-        <EqualizerSection
-          presetId={presetId}
-          previewGains={previewGains}
-          onReset={handleReset}
-          onPresetPress={handlePresetPress}
-          onValueChange={handleValueChange}
-          onSlidingComplete={handleSlidingComplete}
-          layoutMode={layoutMode}
-        />
-        <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
-        <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
-        <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
-        <SurroundSection
-          enabled={surroundEnabled}
-          speed={surroundSpeed}
-          distance={soundDistance}
-          onToggle={() => { setSurroundEnabled(value => !value) }}
-          onSpeedChange={setSurroundSpeed}
-          onDistanceChange={setSoundDistance}
-        />
+        <View style={styles.sectionBlock}>
+          <EnvironmentSection
+            selectedConvolutionId={selectedConvolutionId}
+            originGain={originGain}
+            effectGain={effectGain}
+            onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
+            onOriginGainChange={setOriginGain}
+            onEffectGainChange={setEffectGain}
+          />
+        </View>
+        <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
+          <EqualizerSection
+            presetId={presetId}
+            previewGains={previewGains}
+            onReset={handleReset}
+            onPresetPress={handlePresetPress}
+            onValueChange={handleValueChange}
+            onSlidingComplete={handleSlidingComplete}
+            layoutMode={layoutMode}
+          />
+        </View>
+        <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
+          <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
+        </View>
+        <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
+          <SurroundSection
+            enabled={surroundEnabled}
+            speed={surroundSpeed}
+            distance={soundDistance}
+            onToggle={() => { setSurroundEnabled(value => !value) }}
+            onSpeedChange={setSurroundSpeed}
+            onDistanceChange={setSoundDistance}
+          />
+        </View>
         {showTip ? (
           <View style={styles.tip}>
             <Text size={12} color={theme['c-font-label']}>{t('setting_play_sound_effect_tip')}</Text>
@@ -485,25 +490,29 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
     <View style={styles.container}>
       <View style={styles.layout}>
         <View style={styles.leftColumn}>
-          <EnvironmentSection
-            selectedConvolutionId={selectedConvolutionId}
-            originGain={originGain}
-            effectGain={effectGain}
-            onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
-          onOriginGainChange={setOriginGain}
-          onEffectGainChange={setEffectGain}
-        />
-          <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
-          <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
-          <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
-          <SurroundSection
-            enabled={surroundEnabled}
-            speed={surroundSpeed}
-            distance={soundDistance}
-            onToggle={() => { setSurroundEnabled(value => !value) }}
-            onSpeedChange={setSurroundSpeed}
-            onDistanceChange={setSoundDistance}
-          />
+          <View style={styles.sectionBlock}>
+            <EnvironmentSection
+              selectedConvolutionId={selectedConvolutionId}
+              originGain={originGain}
+              effectGain={effectGain}
+              onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
+              onOriginGainChange={setOriginGain}
+              onEffectGainChange={setEffectGain}
+            />
+          </View>
+          <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
+            <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
+          </View>
+          <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
+            <SurroundSection
+              enabled={surroundEnabled}
+              speed={surroundSpeed}
+              distance={soundDistance}
+              onToggle={() => { setSurroundEnabled(value => !value) }}
+              onSpeedChange={setSurroundSpeed}
+              onDistanceChange={setSoundDistance}
+            />
+          </View>
           {showTip ? (
             <View style={styles.tip}>
               <Text size={12} color={theme['c-font-label']}>{t('setting_play_sound_effect_tip')}</Text>
@@ -514,15 +523,17 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
         <View style={{ ...styles.columnDivider, borderRightColor: dividerColor }} />
 
         <View style={styles.rightColumn}>
-          <EqualizerSection
-            presetId={presetId}
-            previewGains={previewGains}
-            onReset={handleReset}
-            onPresetPress={handlePresetPress}
-            onValueChange={handleValueChange}
-            onSlidingComplete={handleSlidingComplete}
-            layoutMode={layoutMode}
-          />
+          <View style={styles.sectionBlock}>
+            <EqualizerSection
+              presetId={presetId}
+              previewGains={previewGains}
+              onReset={handleReset}
+              onPresetPress={handlePresetPress}
+              onValueChange={handleValueChange}
+              onSlidingComplete={handleSlidingComplete}
+              layoutMode={layoutMode}
+            />
+          </View>
         </View>
       </View>
     </View>
@@ -539,7 +550,7 @@ const styles = createStyle({
   layout: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    gap: 10,
+    gap: 12,
   },
   leftColumn: {
     flex: 1,
@@ -554,9 +565,19 @@ const styles = createStyle({
     borderRightWidth: 1,
     borderStyle: 'dashed',
     borderRightColor: 'rgba(120, 180, 160, 0.5)',
+    marginVertical: 2,
+  },
+  sectionBlock: {
+    minWidth: 0,
+  },
+  sectionBlockWithDivider: {
+    borderTopWidth: 1,
+    borderStyle: 'dashed',
+    paddingTop: 14,
+    marginTop: 12,
   },
   section: {
-    paddingBottom: 4,
+    paddingBottom: 2,
   },
   sectionTitle: {
     fontWeight: '600',
@@ -572,12 +593,6 @@ const styles = createStyle({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-  },
-  sectionDivider: {
-    borderTopWidth: 1,
-    borderStyle: 'dashed',
-    marginBottom: 10,
-    paddingTop: 10,
   },
   resetButton: {
     paddingHorizontal: 10,
@@ -597,8 +612,8 @@ const styles = createStyle({
     gap: 3,
   },
   placeholderGroup: {
-    gap: 6,
-    marginBottom: 8,
+    gap: 8,
+    marginBottom: 10,
   },
   placeholderSliderItem: {
     gap: 2,
@@ -623,17 +638,17 @@ const styles = createStyle({
     justifyContent: 'center',
   },
   tip: {
-    marginTop: 8,
+    marginTop: 10,
   },
   equalizerGrid: {
-    marginBottom: 8,
+    marginBottom: 10,
   },
   equalizerRow: {
     flexDirection: 'row',
   },
   equalizerItem: {
     flex: 1,
-    marginBottom: 4,
+    marginBottom: 6,
   },
   equalizerSliderRow: {
     flexDirection: 'row',
@@ -648,10 +663,10 @@ const styles = createStyle({
     textAlign: 'right',
   },
   stackedEqualizerList: {
-    marginBottom: 8,
+    marginBottom: 10,
   },
   stackedEqualizerItem: {
-    marginBottom: 4,
+    marginBottom: 6,
   },
   presetList: {
     flexDirection: 'row',

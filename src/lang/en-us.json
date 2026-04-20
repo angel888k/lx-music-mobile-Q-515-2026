@@ -363,6 +363,7 @@
   "setting_play_sound_effect_environment_effect_gain": "Effect Gain",
   "setting_play_sound_effect_pitch": "Pitch Shift",
   "setting_play_sound_effect_surround": "3D Surround (Headphones Required)",
+  "setting_play_sound_effect_surround_enable": "Enable",
   "setting_play_sound_effect_surround_speed": "Rotation Speed",
   "setting_play_sound_effect_surround_distance": "Sound Distance",
   "setting_play_sound_effect_env_telephone": "Telephone",

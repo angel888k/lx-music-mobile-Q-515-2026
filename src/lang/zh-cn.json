@@ -363,6 +363,7 @@
   "setting_play_sound_effect_environment_effect_gain": "环境音效增益",
   "setting_play_sound_effect_pitch": "音调升降调节",
   "setting_play_sound_effect_surround": "3D 立体环绕（需使用耳机）",
+  "setting_play_sound_effect_surround_enable": "启用",
   "setting_play_sound_effect_surround_speed": "环绕速度",
   "setting_play_sound_effect_surround_distance": "声音距离",
   "setting_play_sound_effect_env_telephone": "电话",
