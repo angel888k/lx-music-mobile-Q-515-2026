@@ -59,7 +59,7 @@ export default memo(() => {
         <Title />
         <TimeoutExitBtn />
         <Btn icon="slider" color={isSoundEffectActive(setting) ? theme['c-primary-font-active'] : undefined} onPress={showSoundEffect} />
-        <Btn icon="setting" onPress={showSetting} />
+        <Btn icon="setting" size={16} onPress={showSetting} />
       </View>
       <SoundEffectPopup ref={soundEffectPopupRef} layoutMode="stacked" />
       <SettingPopup ref={popupRef} direction="vertical" />

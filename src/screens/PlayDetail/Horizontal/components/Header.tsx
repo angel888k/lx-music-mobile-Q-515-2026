@@ -57,7 +57,7 @@ export default memo(() => {
         <Title />
         <CommentBtn />
         <Btn icon="slider" color={isSoundEffectActive(setting) ? theme['c-primary-font-active'] : undefined} onPress={showSoundEffect} />
-        <Btn icon="setting" onPress={showSetting} />
+        <Btn icon="setting" size={18} onPress={showSetting} />
       </View>
       <SoundEffectPopup ref={soundEffectPopupRef} position="bottom" layoutMode="split" />
       <SettingPopup ref={popupRef} position="left" direction="horizontal" />

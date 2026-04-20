@@ -108,14 +108,16 @@ const PlaceholderSliderRow = memo(({
     <View style={styles.placeholderSliderItem}>
       {label ? <Text size={13}>{label}</Text> : null}
       <View style={styles.placeholderSliderContent}>
-        <Slider
-          minimumValue={minimumValue}
-          maximumValue={maximumValue}
-          step={step}
-          value={value}
-          onValueChange={onValueChange}
-          onSlidingComplete={onSlidingComplete}
-        />
+        <View style={styles.sliderWrap}>
+          <Slider
+            minimumValue={minimumValue}
+            maximumValue={maximumValue}
+            step={step}
+            value={value}
+            onValueChange={onValueChange}
+            onSlidingComplete={onSlidingComplete}
+          />
+        </View>
         <Text size={12} color={theme['c-font-label']} style={styles.placeholderValue}>{formatter(value)}</Text>
       </View>
     </View>
@@ -141,6 +143,7 @@ const EqualizerSection = memo(({
 }) => {
   const t = useI18n()
   const theme = useTheme()
+  const dividerColor = theme['c-primary-alpha-700']
 
   const equalizerRows = useMemo(() => {
     const result: Array<Array<typeof equalizerFrequencies[number]>> = []
@@ -170,18 +173,22 @@ const EqualizerSection = memo(({
                       style={{
                         ...styles.equalizerItem,
                         borderRightWidth: frequencyIndex == 0 ? 1 : 0,
-                        borderRightColor: theme['c-primary-alpha-900'],
+                        borderRightColor: dividerColor,
+                        paddingRight: frequencyIndex == 0 ? 8 : 0,
+                        paddingLeft: frequencyIndex == 1 ? 8 : 0,
                       }}>
                       <View style={styles.equalizerSliderRow}>
                         <Text size={13} style={styles.equalizerLabel}>{frequency >= 1000 ? `${frequency / 1000}k` : `${frequency}`}</Text>
-                        <Slider
-                          minimumValue={minGain}
-                          maximumValue={maxGain}
-                          step={0.1}
-                          value={previewGains[frequency]}
-                          onValueChange={value => { onValueChange(frequency, Number(value)) }}
-                          onSlidingComplete={value => { onSlidingComplete(frequency, Number(value)) }}
-                        />
+                        <View style={styles.sliderWrap}>
+                          <Slider
+                            minimumValue={minGain}
+                            maximumValue={maxGain}
+                            step={0.1}
+                            value={previewGains[frequency]}
+                            onValueChange={value => { onValueChange(frequency, Number(value)) }}
+                            onSlidingComplete={value => { onSlidingComplete(frequency, Number(value)) }}
+                          />
+                        </View>
                         <Text size={12} color={theme['c-font-label']} style={styles.equalizerValue}>{formatGain(previewGains[frequency])}</Text>
                       </View>
                     </View>
@@ -196,14 +203,16 @@ const EqualizerSection = memo(({
                 <View key={frequency} style={styles.stackedEqualizerItem}>
                   <View style={styles.equalizerSliderRow}>
                     <Text size={13} style={styles.equalizerLabel}>{frequency >= 1000 ? `${frequency / 1000}k` : `${frequency}`}</Text>
-                    <Slider
-                      minimumValue={minGain}
-                      maximumValue={maxGain}
-                      step={0.1}
-                      value={previewGains[frequency]}
-                      onValueChange={value => { onValueChange(frequency, Number(value)) }}
-                      onSlidingComplete={value => { onSlidingComplete(frequency, Number(value)) }}
-                    />
+                    <View style={styles.sliderWrap}>
+                      <Slider
+                        minimumValue={minGain}
+                        maximumValue={maxGain}
+                        step={0.1}
+                        value={previewGains[frequency]}
+                        onValueChange={value => { onValueChange(frequency, Number(value)) }}
+                        onSlidingComplete={value => { onSlidingComplete(frequency, Number(value)) }}
+                      />
+                    </View>
                     <Text size={12} color={theme['c-font-label']} style={styles.equalizerValue}>{formatGain(previewGains[frequency])}</Text>
                   </View>
                 </View>
@@ -387,6 +396,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
 }) => {
   const t = useI18n()
   const theme = useTheme()
+  const dividerColor = theme['c-primary-alpha-700']
   const setting = useSetting()
   const [previewGains, setPreviewGains] = useState<PreviewGains>(() => getEqualizerGains(setting))
   const [selectedConvolutionId, setSelectedConvolutionId] = useState<PlaceholderConvolutionId | null>(null)
@@ -441,7 +451,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
           onOriginGainChange={setOriginGain}
           onEffectGainChange={setEffectGain}
         />
-        <View style={styles.sectionDivider} />
+        <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
         <EqualizerSection
           presetId={presetId}
           previewGains={previewGains}
@@ -451,9 +461,9 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
           onSlidingComplete={handleSlidingComplete}
           layoutMode={layoutMode}
         />
-        <View style={styles.sectionDivider} />
+        <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
         <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
-        <View style={styles.sectionDivider} />
+        <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
         <SurroundSection
           enabled={surroundEnabled}
           speed={surroundSpeed}
@@ -480,12 +490,12 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
             originGain={originGain}
             effectGain={effectGain}
             onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
-            onOriginGainChange={setOriginGain}
-            onEffectGainChange={setEffectGain}
-          />
-          <View style={styles.sectionDivider} />
+          onOriginGainChange={setOriginGain}
+          onEffectGainChange={setEffectGain}
+        />
+          <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
           <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
-          <View style={styles.sectionDivider} />
+          <View style={{ ...styles.sectionDivider, borderTopColor: dividerColor }} />
           <SurroundSection
             enabled={surroundEnabled}
             speed={surroundSpeed}
@@ -501,7 +511,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
           ) : null}
         </View>
 
-        <View style={styles.columnDivider} />
+        <View style={{ ...styles.columnDivider, borderRightColor: dividerColor }} />
 
         <View style={styles.rightColumn}>
           <EqualizerSection
@@ -529,7 +539,7 @@ const styles = createStyle({
   layout: {
     flexDirection: 'row',
     alignItems: 'stretch',
-    gap: 14,
+    gap: 10,
   },
   leftColumn: {
     flex: 1,
@@ -546,7 +556,7 @@ const styles = createStyle({
     borderRightColor: 'rgba(120, 180, 160, 0.5)',
   },
   section: {
-    paddingBottom: 10,
+    paddingBottom: 4,
   },
   sectionTitle: {
     fontWeight: '600',
@@ -555,8 +565,8 @@ const styles = createStyle({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 10,
-    gap: 12,
+    marginBottom: 8,
+    gap: 8,
   },
   sectionHeaderTitle: {
     flexDirection: 'row',
@@ -566,9 +576,8 @@ const styles = createStyle({
   sectionDivider: {
     borderTopWidth: 1,
     borderStyle: 'dashed',
-    borderTopColor: 'rgba(120, 180, 160, 0.5)',
-    marginBottom: 12,
-    paddingTop: 12,
+    marginBottom: 10,
+    paddingTop: 10,
   },
   resetButton: {
     paddingHorizontal: 10,
@@ -578,28 +587,29 @@ const styles = createStyle({
   envList: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginBottom: 10,
+    marginBottom: 8,
   },
   placeholderCheckbox: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginRight: 14,
-    marginBottom: 8,
-    gap: 4,
+    marginRight: 10,
+    marginBottom: 6,
+    gap: 3,
   },
   placeholderGroup: {
-    gap: 8,
-    marginBottom: 10,
+    gap: 6,
+    marginBottom: 8,
   },
   placeholderSliderItem: {
-    gap: 4,
+    gap: 2,
   },
   placeholderSliderContent: {
     flexDirection: 'row',
     alignItems: 'center',
+    width: '100%',
   },
   placeholderValue: {
-    width: 46,
+    width: 38,
     textAlign: 'right',
   },
   addPresetButton: {
@@ -616,42 +626,46 @@ const styles = createStyle({
     marginTop: 8,
   },
   equalizerGrid: {
-    marginBottom: 10,
+    marginBottom: 8,
   },
   equalizerRow: {
     flexDirection: 'row',
   },
   equalizerItem: {
     flex: 1,
-    paddingRight: 10,
-    marginBottom: 6,
+    marginBottom: 4,
   },
   equalizerSliderRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    width: '100%',
   },
   equalizerLabel: {
-    width: 30,
+    width: 24,
   },
   equalizerValue: {
-    width: 46,
+    width: 38,
     textAlign: 'right',
   },
   stackedEqualizerList: {
-    marginBottom: 10,
+    marginBottom: 8,
   },
   stackedEqualizerItem: {
-    marginBottom: 6,
+    marginBottom: 4,
   },
   presetList: {
     flexDirection: 'row',
     flexWrap: 'wrap',
   },
   presetButton: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
     borderRadius: 4,
-    marginRight: 10,
-    marginBottom: 10,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  sliderWrap: {
+    flex: 1,
+    minWidth: 0,
   },
 })
