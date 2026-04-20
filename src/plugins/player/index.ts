@@ -3,6 +3,7 @@ import { Platform } from 'react-native'
 import { updateOptions, setVolume, setPlaybackRate, migratePlayerCache, destroy as destroyPlayer, getPosition } from './utils'
 import { getCurrentTrack, restoreTrack, updateMetaData } from './playList'
 import { isNativeFlacActive, restoreNativeFlacPlayback, snapshotNativeFlacPlayback } from './nativeFlac'
+import { soundEffectController } from './soundEffect'
 import settingState from '@/store/setting/state'
 import playerState from '@/store/player/state'
 
@@ -45,6 +46,7 @@ const initial = async({ volume, playRate, cacheSize, isHandleAudioFocus, isEnabl
   await updateOptions()
   await setVolume(volume)
   await setPlaybackRate(playRate)
+  await soundEffectController.applyCurrentEqualizerConfig()
   // listenEvent()
 }
 

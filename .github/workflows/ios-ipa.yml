@@ -64,6 +64,8 @@ jobs:
       - name: Build unsigned iOS app
         shell: bash
         run: |
+          mkdir -p build
+          set -o pipefail
           xcodebuild \
             -workspace "$IOS_WORKSPACE" \
             -scheme "$IOS_SCHEME" \
@@ -76,7 +78,22 @@ jobs:
             CURRENT_PROJECT_VERSION="$PACKAGE_VERSION_CODE" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            clean build
+            clean build 2>&1 | tee build/xcodebuild.log
+
+      - name: Show first Xcode errors
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== Xcode errors ====="
+          grep -n -C 3 "error:" build/xcodebuild.log | head -120 || true
+
+      - name: Upload Xcode build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: build/xcodebuild.log
+          if-no-files-found: ignore
 
       - name: Package unsigned IPA
         shell: bash
