@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { TouchableOpacity, View } from 'react-native'
 
 import { Icon } from '@/components/common/Icon'
@@ -6,12 +6,14 @@ import Text from '@/components/common/Text'
 import Slider from '@/components/common/Slider'
 import { updateSetting } from '@/core/common'
 import { useI18n } from '@/lang'
-import { createStyle } from '@/utils/tools'
+import SoundEffectPresetSaveModal, { type SoundEffectPresetSaveModalType } from './SoundEffectPresetSaveModal'
+import { createStyle, confirmDialog } from '@/utils/tools'
 import { useTheme } from '@/store/theme/hook'
 import { useSetting } from '@/store/setting/hook'
 import {
   createConvolutionSettingPatch,
   createCustomBandSettingPatch,
+  createCustomGainsSettingPatch,
   createEqualizerGainsRecord,
   createPresetSettingPatch,
   equalizerFrequencies,
@@ -21,6 +23,17 @@ import {
   soundEffectController,
   soundEffectConvolutionOptions,
 } from '@/plugins/player/soundEffect'
+import {
+  getUserConvolutionPresetList,
+  getUserEQPresetList,
+  getUserPitchShifterPresetList,
+  removeUserConvolutionPreset,
+  removeUserEQPreset,
+  removeUserPitchShifterPreset,
+  saveUserConvolutionPreset,
+  saveUserEQPreset,
+  saveUserPitchShifterPreset,
+} from '@/store/soundEffect'
 
 const minGain = -15
 const maxGain = 15
@@ -102,16 +115,26 @@ const PlaceholderSliderRow = memo(({
 const EqualizerSection = memo(({
   presetId,
   previewGains,
+  userPresetList,
+  activeUserPresetId,
   onReset,
   onPresetPress,
+  onSavePreset,
+  onUserPresetPress,
+  onUserPresetLongPress,
   onValueChange,
   onSlidingComplete,
   layoutMode,
 }: {
   presetId: LX.SoundEffectPresetId
   previewGains: PreviewGains
+  userPresetList: LX.SoundEffect.EQPreset[]
+  activeUserPresetId: string | null
   onReset: () => void
   onPresetPress: (presetId: Exclude<LX.SoundEffectPresetId, 'custom'>) => void
+  onSavePreset: () => void
+  onUserPresetPress: (preset: LX.SoundEffect.EQPreset) => void
+  onUserPresetLongPress: (preset: LX.SoundEffect.EQPreset) => void
   onValueChange: (frequency: typeof equalizerFrequencies[number], value: number) => void
   onSlidingComplete: (frequency: typeof equalizerFrequencies[number], value: number) => void
   layoutMode: LayoutMode
@@ -132,9 +155,14 @@ const EqualizerSection = memo(({
     <View style={styles.section}>
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_equalizer')}</Text>
-        <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
-          <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity activeOpacity={0.7} onPress={onSavePreset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+            <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_save')}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+            <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {layoutMode == 'split'
@@ -213,6 +241,24 @@ const EqualizerSection = memo(({
             </TouchableOpacity>
           )
         })}
+        {userPresetList.map(preset => {
+          const isActive = preset.id == activeUserPresetId
+          return (
+            <TouchableOpacity
+              key={preset.id}
+              activeOpacity={0.7}
+              style={{
+                ...styles.presetButton,
+                backgroundColor: isActive ? theme['c-button-background-selected'] : theme['c-button-background'],
+              }}
+              onPress={() => { onUserPresetPress(preset) }}
+              onLongPress={() => { onUserPresetLongPress(preset) }}>
+              <Text size={13} color={isActive ? theme['c-button-font-selected'] : theme['c-button-font']}>
+                {preset.name}
+              </Text>
+            </TouchableOpacity>
+          )
+        })}
       </View>
     </View>
   )
@@ -222,23 +268,39 @@ const EnvironmentSection = memo(({
   selectedSource,
   mainGain,
   sendGain,
+  userPresetList,
+  activeUserPresetId,
   onToggleConvolution,
   onMainGainChange,
   onSendGainChange,
+  onSavePreset,
+  onUserPresetPress,
+  onUserPresetLongPress,
 }: {
   selectedSource: string
   mainGain: number
   sendGain: number
+  userPresetList: LX.SoundEffect.ConvolutionPreset[]
+  activeUserPresetId: string | null
   onToggleConvolution: (source: string) => void
   onMainGainChange: (value: number) => void
   onSendGainChange: (value: number) => void
+  onSavePreset: () => void
+  onUserPresetPress: (preset: LX.SoundEffect.ConvolutionPreset) => void
+  onUserPresetLongPress: (preset: LX.SoundEffect.ConvolutionPreset) => void
 }) => {
   const t = useI18n()
+  const theme = useTheme()
   const disabledConvolution = !selectedSource
 
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_environment')}</Text>
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_environment')}</Text>
+        <TouchableOpacity activeOpacity={0.7} onPress={onSavePreset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+          <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_save')}</Text>
+        </TouchableOpacity>
+      </View>
       <View style={styles.envList}>
         {soundEffectConvolutionOptions.map(item => (
           <PlaceholderCheckbox
@@ -276,18 +338,49 @@ const EnvironmentSection = memo(({
           formatter={formatPercent}
         />
       </View>
+
+      <View style={styles.presetList}>
+        {userPresetList.map(preset => {
+          const isActive = preset.id == activeUserPresetId
+          return (
+            <TouchableOpacity
+              key={preset.id}
+              activeOpacity={0.7}
+              style={{
+                ...styles.presetButton,
+                backgroundColor: isActive ? theme['c-button-background-selected'] : theme['c-button-background'],
+              }}
+              onPress={() => { onUserPresetPress(preset) }}
+              onLongPress={() => { onUserPresetLongPress(preset) }}>
+              <Text size={13} color={isActive ? theme['c-button-font-selected'] : theme['c-button-font']}>
+                {preset.name}
+              </Text>
+            </TouchableOpacity>
+          )
+        })}
+      </View>
     </View>
   )
 })
 
 const PitchSection = memo(({
   playbackRate,
+  userPresetList,
+  activeUserPresetId,
   onReset,
   onValueChange,
+  onSavePreset,
+  onUserPresetPress,
+  onUserPresetLongPress,
 }: {
   playbackRate: number
+  userPresetList: LX.SoundEffect.PitchShifterPreset[]
+  activeUserPresetId: string | null
   onReset: () => void
   onValueChange: (value: number) => void
+  onSavePreset: () => void
+  onUserPresetPress: (preset: LX.SoundEffect.PitchShifterPreset) => void
+  onUserPresetLongPress: (preset: LX.SoundEffect.PitchShifterPreset) => void
 }) => {
   const t = useI18n()
   const theme = useTheme()
@@ -299,9 +392,14 @@ const PitchSection = memo(({
           <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_pitch')}</Text>
           <Icon name="help" size={14} color={theme['c-font-label']} />
         </View>
-        <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
-          <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity activeOpacity={0.7} onPress={onSavePreset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+            <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_save')}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+            <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
+          </TouchableOpacity>
+        </View>
       </View>
       <PlaceholderSliderRow
         label=""
@@ -312,6 +410,26 @@ const PitchSection = memo(({
         onValueChange={value => { onValueChange(Number(value)) }}
         formatter={formatPlaybackRate}
       />
+      <View style={styles.presetList}>
+        {userPresetList.map(preset => {
+          const isActive = preset.id == activeUserPresetId
+          return (
+            <TouchableOpacity
+              key={preset.id}
+              activeOpacity={0.7}
+              style={{
+                ...styles.presetButton,
+                backgroundColor: isActive ? theme['c-button-background-selected'] : theme['c-button-background'],
+              }}
+              onPress={() => { onUserPresetPress(preset) }}
+              onLongPress={() => { onUserPresetLongPress(preset) }}>
+              <Text size={13} color={isActive ? theme['c-button-font-selected'] : theme['c-button-font']}>
+                {preset.name}
+              </Text>
+            </TouchableOpacity>
+          )
+        })}
+      </View>
     </View>
   )
 })
@@ -375,7 +493,11 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
   const theme = useTheme()
   const dividerColor = theme['c-primary-alpha-500']
   const setting = useSetting()
+  const savePresetModalRef = useRef<SoundEffectPresetSaveModalType>(null)
   const [previewGains, setPreviewGains] = useState<PreviewGains>(() => getEqualizerGains(setting))
+  const [userEqPresetList, setUserEqPresetList] = useState<LX.SoundEffect.EQPreset[]>([])
+  const [userConvolutionPresetList, setUserConvolutionPresetList] = useState<LX.SoundEffect.ConvolutionPreset[]>([])
+  const [userPitchPresetList, setUserPitchPresetList] = useState<LX.SoundEffect.PitchShifterPreset[]>([])
   const presetId = normalizeEqualizerPresetId(setting['player.soundEffect.preset'])
   const convolutionSource = setting['player.soundEffect.convolution.fileName']
   const convolutionMainGain = setting['player.soundEffect.convolution.mainGain']
@@ -384,10 +506,40 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
   const surroundEnabled = setting['player.soundEffect.panner.enable']
   const surroundSpeed = setting['player.soundEffect.panner.speed']
   const soundDistance = setting['player.soundEffect.panner.soundR']
+  const activeEqUserPresetId = useMemo(() => userEqPresetList.find(preset =>
+    equalizerFrequencies.every(frequency => preset[`hz${frequency}` as keyof LX.SoundEffect.EQPreset] == previewGains[frequency]),
+  )?.id ?? null, [previewGains, userEqPresetList])
+  const activeConvolutionUserPresetId = useMemo(() => userConvolutionPresetList.find(preset =>
+    preset.source == convolutionSource &&
+    preset.mainGain == convolutionMainGain &&
+    preset.sendGain == convolutionSendGain,
+  )?.id ?? null, [convolutionMainGain, convolutionSendGain, convolutionSource, userConvolutionPresetList])
+  const activePitchUserPresetId = useMemo(() => userPitchPresetList.find(preset =>
+    Math.abs(preset.playbackRate - pitchPlaybackRate) < 0.001,
+  )?.id ?? null, [pitchPlaybackRate, userPitchPresetList])
 
   useEffect(() => {
     setPreviewGains(getEqualizerGains(setting))
   }, [setting])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadPresetLists = async() => {
+      const [eqList, convolutionList, pitchList] = await Promise.all([
+        getUserEQPresetList(),
+        getUserConvolutionPresetList(),
+        getUserPitchShifterPresetList(),
+      ])
+      if (cancelled) return
+      setUserEqPresetList(eqList)
+      setUserConvolutionPresetList(convolutionList)
+      setUserPitchPresetList(pitchList)
+    }
+    void loadPresetLists()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const handleReset = () => {
     updateSetting(createPresetSettingPatch('none'))
@@ -441,6 +593,113 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
     updateSetting({ 'player.soundEffect.pitchShifter.playbackRate': value })
   }
 
+  const handleShowSaveEqPreset = () => {
+    savePresetModalRef.current?.show({
+      title: t('setting_play_sound_effect_save_eq_title'),
+      onSave: async(name) => {
+        const nextList = await saveUserEQPreset({
+          name,
+          hz31: previewGains[31],
+          hz62: previewGains[62],
+          hz125: previewGains[125],
+          hz250: previewGains[250],
+          hz500: previewGains[500],
+          hz1000: previewGains[1000],
+          hz2000: previewGains[2000],
+          hz4000: previewGains[4000],
+          hz8000: previewGains[8000],
+          hz16000: previewGains[16000],
+        })
+        setUserEqPresetList(nextList)
+      },
+    })
+  }
+
+  const handleApplyEqPreset = (preset: LX.SoundEffect.EQPreset) => {
+    const gains = [
+      preset.hz31,
+      preset.hz62,
+      preset.hz125,
+      preset.hz250,
+      preset.hz500,
+      preset.hz1000,
+      preset.hz2000,
+      preset.hz4000,
+      preset.hz8000,
+      preset.hz16000,
+    ]
+    setPreviewGains(createEqualizerGainsRecord(gains))
+    updateSetting(createCustomGainsSettingPatch(gains))
+  }
+
+  const handleRemoveEqPreset = async(preset: LX.SoundEffect.EQPreset) => {
+    const confirm = await confirmDialog({
+      title: t('setting_play_sound_effect_remove_preset_title'),
+      message: t('setting_play_sound_effect_remove_preset_message', { name: preset.name }),
+    })
+    if (!confirm) return
+    setUserEqPresetList(await removeUserEQPreset(preset.id))
+  }
+
+  const handleShowSaveConvolutionPreset = () => {
+    savePresetModalRef.current?.show({
+      title: t('setting_play_sound_effect_save_env_title'),
+      onSave: async(name) => {
+        if (!convolutionSource) return
+        const nextList = await saveUserConvolutionPreset({
+          name,
+          source: convolutionSource,
+          mainGain: convolutionMainGain,
+          sendGain: convolutionSendGain,
+        })
+        setUserConvolutionPresetList(nextList)
+      },
+    })
+  }
+
+  const handleApplyConvolutionPreset = (preset: LX.SoundEffect.ConvolutionPreset) => {
+    updateSetting({
+      'player.soundEffect.convolution.fileName': preset.source,
+      'player.soundEffect.convolution.mainGain': preset.mainGain,
+      'player.soundEffect.convolution.sendGain': preset.sendGain,
+    })
+  }
+
+  const handleRemoveConvolutionPreset = async(preset: LX.SoundEffect.ConvolutionPreset) => {
+    const confirm = await confirmDialog({
+      title: t('setting_play_sound_effect_remove_preset_title'),
+      message: t('setting_play_sound_effect_remove_preset_message', { name: preset.name }),
+    })
+    if (!confirm) return
+    setUserConvolutionPresetList(await removeUserConvolutionPreset(preset.id))
+  }
+
+  const handleShowSavePitchPreset = () => {
+    savePresetModalRef.current?.show({
+      title: t('setting_play_sound_effect_save_pitch_title'),
+      onSave: async(name) => {
+        const nextList = await saveUserPitchShifterPreset({
+          name,
+          playbackRate: pitchPlaybackRate,
+        })
+        setUserPitchPresetList(nextList)
+      },
+    })
+  }
+
+  const handleApplyPitchPreset = (preset: LX.SoundEffect.PitchShifterPreset) => {
+    updateSetting({ 'player.soundEffect.pitchShifter.playbackRate': preset.playbackRate })
+  }
+
+  const handleRemovePitchPreset = async(preset: LX.SoundEffect.PitchShifterPreset) => {
+    const confirm = await confirmDialog({
+      title: t('setting_play_sound_effect_remove_preset_title'),
+      message: t('setting_play_sound_effect_remove_preset_message', { name: preset.name }),
+    })
+    if (!confirm) return
+    setUserPitchPresetList(await removeUserPitchShifterPreset(preset.id))
+  }
+
   const handleToggleSurround = () => {
     updateSetting({ 'player.soundEffect.panner.enable': !surroundEnabled })
   }
@@ -461,24 +720,43 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
             selectedSource={convolutionSource}
             mainGain={convolutionMainGain}
             sendGain={convolutionSendGain}
+            userPresetList={userConvolutionPresetList}
+            activeUserPresetId={activeConvolutionUserPresetId}
             onToggleConvolution={handleToggleConvolution}
             onMainGainChange={handleUpdateConvolutionMainGain}
             onSendGainChange={handleUpdateConvolutionSendGain}
+            onSavePreset={handleShowSaveConvolutionPreset}
+            onUserPresetPress={handleApplyConvolutionPreset}
+            onUserPresetLongPress={preset => { void handleRemoveConvolutionPreset(preset) }}
           />
         </View>
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
           <EqualizerSection
             presetId={presetId}
             previewGains={previewGains}
+            userPresetList={userEqPresetList}
+            activeUserPresetId={activeEqUserPresetId}
             onReset={handleReset}
             onPresetPress={handlePresetPress}
+            onSavePreset={handleShowSaveEqPreset}
+            onUserPresetPress={handleApplyEqPreset}
+            onUserPresetLongPress={preset => { void handleRemoveEqPreset(preset) }}
             onValueChange={handleValueChange}
             onSlidingComplete={handleSlidingComplete}
             layoutMode={layoutMode}
           />
         </View>
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
-          <PitchSection playbackRate={pitchPlaybackRate} onReset={handleResetPitch} onValueChange={handleUpdatePitch} />
+          <PitchSection
+            playbackRate={pitchPlaybackRate}
+            userPresetList={userPitchPresetList}
+            activeUserPresetId={activePitchUserPresetId}
+            onReset={handleResetPitch}
+            onValueChange={handleUpdatePitch}
+            onSavePreset={handleShowSavePitchPreset}
+            onUserPresetPress={handleApplyPitchPreset}
+            onUserPresetLongPress={preset => { void handleRemovePitchPreset(preset) }}
+          />
         </View>
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
           <SurroundSection
@@ -495,6 +773,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
             <Text size={12} color={theme['c-font-label']}>{t('setting_play_sound_effect_tip')}</Text>
           </View>
         ) : null}
+        <SoundEffectPresetSaveModal ref={savePresetModalRef} />
       </View>
     )
   }
@@ -508,13 +787,27 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
               selectedSource={convolutionSource}
               mainGain={convolutionMainGain}
               sendGain={convolutionSendGain}
+              userPresetList={userConvolutionPresetList}
+              activeUserPresetId={activeConvolutionUserPresetId}
               onToggleConvolution={handleToggleConvolution}
               onMainGainChange={handleUpdateConvolutionMainGain}
               onSendGainChange={handleUpdateConvolutionSendGain}
+              onSavePreset={handleShowSaveConvolutionPreset}
+              onUserPresetPress={handleApplyConvolutionPreset}
+              onUserPresetLongPress={preset => { void handleRemoveConvolutionPreset(preset) }}
             />
           </View>
           <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
-            <PitchSection playbackRate={pitchPlaybackRate} onReset={handleResetPitch} onValueChange={handleUpdatePitch} />
+            <PitchSection
+              playbackRate={pitchPlaybackRate}
+              userPresetList={userPitchPresetList}
+              activeUserPresetId={activePitchUserPresetId}
+              onReset={handleResetPitch}
+              onValueChange={handleUpdatePitch}
+              onSavePreset={handleShowSavePitchPreset}
+              onUserPresetPress={handleApplyPitchPreset}
+              onUserPresetLongPress={preset => { void handleRemovePitchPreset(preset) }}
+            />
           </View>
           <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
             <SurroundSection
@@ -540,8 +833,13 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
             <EqualizerSection
               presetId={presetId}
               previewGains={previewGains}
+              userPresetList={userEqPresetList}
+              activeUserPresetId={activeEqUserPresetId}
               onReset={handleReset}
               onPresetPress={handlePresetPress}
+              onSavePreset={handleShowSaveEqPreset}
+              onUserPresetPress={handleApplyEqPreset}
+              onUserPresetLongPress={preset => { void handleRemoveEqPreset(preset) }}
               onValueChange={handleValueChange}
               onSlidingComplete={handleSlidingComplete}
               layoutMode={layoutMode}
@@ -549,6 +847,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
           </View>
         </View>
       </View>
+      <SoundEffectPresetSaveModal ref={savePresetModalRef} />
     </View>
   )
 })
@@ -606,6 +905,10 @@ const styles = createStyle({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 8,
   },
   resetButton: {
     paddingHorizontal: 10,

@@ -78,6 +78,9 @@ export const storageDataPrefix = {
   dislikeList: '@dislike_list',
 
   userApi: '@user_api__',
+  soundEffectEQPresetList: '@sound_effect_eq_preset_list',
+  soundEffectConvolutionPresetList: '@sound_effect_convolution_preset_list',
+  soundEffectPitchPresetList: '@sound_effect_pitch_preset_list',
 } as const
 
 // v0.x.x 版本的 data keys

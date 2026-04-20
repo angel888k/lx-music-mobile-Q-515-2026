@@ -286,6 +286,10 @@ export const createCustomBandSettingPatch = (
   return createEqualizerSettingPatch('custom', nextGains)
 }
 
+export const createCustomGainsSettingPatch = (gains: readonly number[]): Partial<LX.AppSetting> => {
+  return createEqualizerSettingPatch('custom', gains)
+}
+
 export const getSoundEffectConvolutionOption = (source?: string | null) => {
   return soundEffectConvolutionOptions.find(option => option.source == source) ?? null
 }
