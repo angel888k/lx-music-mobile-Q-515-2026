@@ -276,6 +276,41 @@ declare global {
       'player.soundEffect.eq.16000': number
 
       /**
+       * 环境音效文件名
+       */
+      'player.soundEffect.convolution.fileName': string
+
+      /**
+       * 环境音效原始输出增益
+       */
+      'player.soundEffect.convolution.mainGain': number
+
+      /**
+       * 环境音效输出增益
+       */
+      'player.soundEffect.convolution.sendGain': number
+
+      /**
+       * 3D 立体环绕是否启用
+       */
+      'player.soundEffect.panner.enable': boolean
+
+      /**
+       * 3D 立体环绕声音距离
+       */
+      'player.soundEffect.panner.soundR': number
+
+      /**
+       * 3D 立体环绕速度
+       */
+      'player.soundEffect.panner.speed': number
+
+      /**
+       * 升降声调
+       */
+      'player.soundEffect.pitchShifter.playbackRate': number
+
+      /**
        * 播放详情页-是否缩放当前播放的歌词行
        */
       // 'playDetail.isZoomActiveLrc': boolean

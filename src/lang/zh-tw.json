@@ -393,7 +393,7 @@
   "setting_play_sound_effect_preset_custom": "自訂",
   "setting_play_sound_effect_equalizer": "均衡器",
   "setting_play_sound_effect_reset": "重設",
-  "setting_play_sound_effect_tip": "目前先接入桌面端的 10 段均衡器預設，效果會在 iOS 原生 FLAC 播放鏈路生效，其他音源鏈路後續再補齊。",
+  "setting_play_sound_effect_tip": "目前已接入桌面端的環境音效、10 段均衡器、升降調與 3D 環繞設定，iOS 原生 FLAC 與 TrackPlayer 鏈路都會生效；不同鏈路的實作方式仍有差異，環境音效與升降調的聽感可能略有不同。",
   "setting_play_show_bluetooth_lyric": "顯示藍牙歌詞",
   "setting_play_show_notification_image": "在通知欄顯示歌曲專輯封面圖片",
   "setting_play_show_roma": "顯示歌詞羅馬音（如果可用）",

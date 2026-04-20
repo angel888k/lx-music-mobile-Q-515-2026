@@ -1,7 +1,9 @@
 import settingState from '@/store/setting/state'
+import { getConvolutionAssetUri } from './assets'
 import type {
   EqualizerFrequency,
   EqualizerPreset,
+  SoundEffectConvolutionOption,
   SoundEffectBandSettingKey,
   SoundEffectSettingKey,
 } from './types'
@@ -74,6 +76,113 @@ export const equalizerPresets: readonly EqualizerPreset[] = Object.freeze([
   },
 ])
 
+export const soundEffectConvolutionOptions: readonly SoundEffectConvolutionOption[] = Object.freeze([
+  {
+    id: 'telephone',
+    labelKey: 'setting_play_sound_effect_env_telephone',
+    source: 'filter-telephone.wav',
+    assetUri: getConvolutionAssetUri('filter-telephone.wav'),
+    mainGain: 0,
+    sendGain: 30,
+  },
+  {
+    id: 'church',
+    labelKey: 'setting_play_sound_effect_env_church',
+    source: 's2_r4_bd.wav',
+    assetUri: getConvolutionAssetUri('s2_r4_bd.wav'),
+    mainGain: 18,
+    sendGain: 9,
+  },
+  {
+    id: 'hall',
+    labelKey: 'setting_play_sound_effect_env_hall',
+    source: 'bright-hall.wav',
+    assetUri: getConvolutionAssetUri('bright-hall.wav'),
+    mainGain: 8,
+    sendGain: 24,
+  },
+  {
+    id: 'cinema',
+    labelKey: 'setting_play_sound_effect_env_cinema',
+    source: 'cinema-diningroom.wav',
+    assetUri: getConvolutionAssetUri('cinema-diningroom.wav'),
+    mainGain: 6,
+    sendGain: 23,
+  },
+  {
+    id: 'restaurant',
+    labelKey: 'setting_play_sound_effect_env_restaurant',
+    source: 'dining-living-true-stereo.wav',
+    assetUri: getConvolutionAssetUri('dining-living-true-stereo.wav'),
+    mainGain: 6,
+    sendGain: 18,
+  },
+  {
+    id: 'bathroom',
+    labelKey: 'setting_play_sound_effect_env_bathroom',
+    source: 'living-bedroom-leveled.wav',
+    assetUri: getConvolutionAssetUri('living-bedroom-leveled.wav'),
+    mainGain: 6,
+    sendGain: 21,
+  },
+  {
+    id: 'indoor',
+    labelKey: 'setting_play_sound_effect_env_indoor',
+    source: 'spreader50-65ms.wav',
+    assetUri: getConvolutionAssetUri('spreader50-65ms.wav'),
+    mainGain: 10,
+    sendGain: 25,
+  },
+  {
+    id: 'stereo',
+    labelKey: 'setting_play_sound_effect_env_stereo',
+    source: 's3_r1_bd.wav',
+    assetUri: getConvolutionAssetUri('s3_r1_bd.wav'),
+    mainGain: 18,
+    sendGain: 8,
+  },
+  {
+    id: 'matrix_1',
+    labelKey: 'setting_play_sound_effect_env_matrix_1',
+    source: 'matrix-reverb1.wav',
+    assetUri: getConvolutionAssetUri('matrix-reverb1.wav'),
+    mainGain: 15,
+    sendGain: 9,
+  },
+  {
+    id: 'matrix_2',
+    labelKey: 'setting_play_sound_effect_env_matrix_2',
+    source: 'matrix-reverb2.wav',
+    assetUri: getConvolutionAssetUri('matrix-reverb2.wav'),
+    mainGain: 13,
+    sendGain: 10,
+  },
+  {
+    id: 'cardioid',
+    labelKey: 'setting_play_sound_effect_env_cardioid',
+    source: 'cardiod-35-10-spread.wav',
+    assetUri: getConvolutionAssetUri('cardiod-35-10-spread.wav'),
+    mainGain: 18,
+    sendGain: 6,
+  },
+  {
+    id: 'magnetic',
+    labelKey: 'setting_play_sound_effect_env_magnetic',
+    source: 'tim-omni-35-10-magnetic.wav',
+    assetUri: getConvolutionAssetUri('tim-omni-35-10-magnetic.wav'),
+    mainGain: 10,
+    sendGain: 2,
+  },
+  {
+    id: 'spring',
+    labelKey: 'setting_play_sound_effect_env_spring',
+    source: 'feedback-spring.wav',
+    assetUri: getConvolutionAssetUri('feedback-spring.wav'),
+    mainGain: 18,
+    sendGain: 8,
+  },
+])
+
 const presetAliasMap: Partial<Record<LX.SoundEffectPresetId, Exclude<LX.SoundEffectPresetId, 'custom'>>> = {
   loudness: 'pop',
   slowSong: 'slow',
@@ -93,6 +202,13 @@ export const getEqualizerBandSettingKey = (frequency: EqualizerFrequency): Sound
 export const soundEffectSettingKeys: readonly SoundEffectSettingKey[] = Object.freeze([
   'player.soundEffect.enabled',
   'player.soundEffect.preset',
+  'player.soundEffect.convolution.fileName',
+  'player.soundEffect.convolution.mainGain',
+  'player.soundEffect.convolution.sendGain',
+  'player.soundEffect.panner.enable',
+  'player.soundEffect.panner.soundR',
+  'player.soundEffect.panner.speed',
+  'player.soundEffect.pitchShifter.playbackRate',
   ...equalizerFrequencies.map(getEqualizerBandSettingKey),
 ])
 
@@ -117,6 +233,13 @@ export const createEqualizerGainsRecord = (gains?: readonly number[]) => {
 }
 
 export const normalizeEqualizerGain = (gain: number) => Math.round(gain * 10) / 10
+export const normalizeConvolutionGain = (gain: number) => Math.min(50, Math.max(0, Math.round(gain)))
+export const normalizePannerSoundR = (soundR: number) => Math.min(30, Math.max(1, Math.round(soundR)))
+export const normalizePannerSpeed = (speed: number) => Math.min(50, Math.max(1, Math.round(speed)))
+export const normalizePitchShifterPlaybackRate = (value: number) => {
+  const rate = Math.round(value * 100) / 100
+  return Math.min(1.5, Math.max(0.5, rate))
+}
 
 export const hasEnabledEqualizerGains = (gains: readonly number[]) => {
   return gains.some(gain => normalizeEqualizerGain(gain) != 0)
@@ -132,7 +255,10 @@ export const getEqualizerGains = (setting = settingState.setting) => {
 }
 
 export const isSoundEffectActive = (setting = settingState.setting) => {
-  return hasEnabledEqualizerGains(equalizerFrequencies.map(frequency => setting[getEqualizerBandSettingKey(frequency)]))
+  return hasEnabledEqualizerGains(equalizerFrequencies.map(frequency => setting[getEqualizerBandSettingKey(frequency)])) ||
+    !!setting['player.soundEffect.convolution.fileName'] ||
+    setting['player.soundEffect.panner.enable'] ||
+    normalizePitchShifterPlaybackRate(setting['player.soundEffect.pitchShifter.playbackRate']) != 1
 }
 
 const createEqualizerSettingPatch = (presetId: LX.SoundEffectPresetId, gains: readonly number[]): Partial<LX.AppSetting> => {
@@ -158,6 +284,28 @@ export const createCustomBandSettingPatch = (
 ): Partial<LX.AppSetting> => {
   const nextGains = equalizerFrequencies.map(item => item == frequency ? gain : setting[getEqualizerBandSettingKey(item)])
   return createEqualizerSettingPatch('custom', nextGains)
+}
+
+export const getSoundEffectConvolutionOption = (source?: string | null) => {
+  return soundEffectConvolutionOptions.find(option => option.source == source) ?? null
+}
+
+export const getSoundEffectConvolutionAssetUri = (source?: string | null) => {
+  return getSoundEffectConvolutionOption(source)?.assetUri ?? ''
+}
+
+export const createConvolutionSettingPatch = (source: string | null): Partial<LX.AppSetting> => {
+  const option = getSoundEffectConvolutionOption(source)
+  if (!option) {
+    return {
+      'player.soundEffect.convolution.fileName': '',
+    }
+  }
+  return {
+    'player.soundEffect.convolution.fileName': option.source,
+    'player.soundEffect.convolution.mainGain': option.mainGain,
+    'player.soundEffect.convolution.sendGain': option.sendGain,
+  }
 }
 
 export const isSoundEffectSettingKey = (key: keyof LX.AppSetting): key is SoundEffectSettingKey => {

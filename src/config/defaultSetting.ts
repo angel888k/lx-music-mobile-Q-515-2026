@@ -47,6 +47,13 @@ const defaultSetting: LX.AppSetting = {
   'player.soundEffect.eq.4000': 0,
   'player.soundEffect.eq.8000': 0,
   'player.soundEffect.eq.16000': 0,
+  'player.soundEffect.convolution.fileName': '',
+  'player.soundEffect.convolution.mainGain': 10,
+  'player.soundEffect.convolution.sendGain': 0,
+  'player.soundEffect.panner.enable': false,
+  'player.soundEffect.panner.soundR': 5,
+  'player.soundEffect.panner.speed': 25,
+  'player.soundEffect.pitchShifter.playbackRate': 1,
 
   // 'playDetail.isZoomActiveLrc': false,
   // 'playDetail.isShowLyricProgressSetting': false,

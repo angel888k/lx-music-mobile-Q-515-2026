@@ -1,21 +1,24 @@
-import { isSoundEffectSupported, updateNativeEqualizerConfig } from '@/utils/nativeModules/soundEffect'
+import { isSoundEffectSupported, updateNativeSoundEffectConfig } from '@/utils/nativeModules/soundEffect'
 import type { SoundEffectAdapter } from '../types'
 
 export const nativeEqualizerAdapter: SoundEffectAdapter = {
-  id: 'native_ios_equalizer',
+  id: 'native_ios_sound_effect',
   capabilities: {
     equalizer: true,
+    convolution: true,
+    panner: true,
+    pitchShifter: true,
     presets: true,
     realTimePreview: true,
     playbackPathCoverage: {
       nativeFlac: 'supported',
-      trackPlayer: 'partial',
+      trackPlayer: 'supported',
     },
   },
   isSupported() {
     return isSoundEffectSupported
   },
   async apply(config) {
-    await updateNativeEqualizerConfig(config)
+    await updateNativeSoundEffectConfig(config)
   },
 }

@@ -4,325 +4,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const rootPath = __dirname
-const equalizerAudioMixSwiftSource = `import AVFoundation
-import MediaToolbox
-
-let lxSoundEffectConfigNotification = Notification.Name("LXSoundEffectConfigDidChangeNotification")
-let lxSoundEffectBandFrequencies: [Float] = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
-
-private struct LXBiquadCoefficients {
-    var b0: Float
-    var b1: Float
-    var b2: Float
-    var a1: Float
-    var a2: Float
-
-    static let bypass = LXBiquadCoefficients(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0)
-
-    var isBypass: Bool {
-        b0 == 1 && b1 == 0 && b2 == 0 && a1 == 0 && a2 == 0
-    }
-}
-
-private struct LXBiquadState {
-    var z1: Float = 0
-    var z2: Float = 0
-}
-
-final class LXEqualizerAudioMixController {
-    private let lock = NSLock()
-    private var enabled = false
-    private var gains = LXEqualizerAudioMixController.normalizeGains([])
-    private var coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
-    private var states: [[LXBiquadState]] = []
-    private var sampleRate: Double = 0
-    private var channelsPerFrame = 0
-    private var bitsPerChannel: UInt32 = 0
-    private var isFloat = false
-    private var isInterleaved = false
-
-    init(enabled: Bool, gains: [Float]) {
-        updateConfig(enabled: enabled, gains: gains)
-    }
-
-    func updateConfig(enabled: Bool, gains: [Float]) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        self.enabled = enabled
-        self.gains = Self.normalizeGains(gains)
-        if sampleRate > 0 {
-            coefficients = Self.makeCoefficients(sampleRate: sampleRate, gains: self.gains)
-        }
-    }
-
-    func makeAudioMix(for asset: AVAsset) -> AVAudioMix? {
-        guard let audioTrack = asset.tracks(withMediaType: .audio).first else { return nil }
-        guard let tap = makeAudioProcessingTap() else { return nil }
-
-        let params = AVMutableAudioMixInputParameters(track: audioTrack)
-        params.audioTapProcessor = tap
-
-        let audioMix = AVMutableAudioMix()
-        audioMix.inputParameters = [params]
-        return audioMix
-    }
-
-    private func makeAudioProcessingTap() -> MTAudioProcessingTap? {
-        var callbacks = MTAudioProcessingTapCallbacks(
-            version: kMTAudioProcessingTapCallbacksVersion_0,
-            clientInfo: UnsafeMutableRawPointer(Unmanaged.passRetained(self).toOpaque()),
-            init: { _, clientInfo, tapStorageOut in
-                tapStorageOut.pointee = clientInfo
-            },
-            finalize: { tap in
-                let storage = MTAudioProcessingTapGetStorage(tap)
-                Unmanaged<LXEqualizerAudioMixController>.fromOpaque(storage).release()
-            },
-            prepare: { tap, _, processingFormat in
-                let storage = MTAudioProcessingTapGetStorage(tap)
-                let processor = Unmanaged<LXEqualizerAudioMixController>.fromOpaque(storage).takeUnretainedValue()
-                processor.prepare(with: processingFormat.pointee)
-            },
-            unprepare: { tap in
-                let storage = MTAudioProcessingTapGetStorage(tap)
-                let processor = Unmanaged<LXEqualizerAudioMixController>.fromOpaque(storage).takeUnretainedValue()
-                processor.unprepare()
-            },
-            process: { tap, numberFrames, _, bufferListInOut, numberFramesOut, flagsOut in
-                let storage = MTAudioProcessingTapGetStorage(tap)
-                let processor = Unmanaged<LXEqualizerAudioMixController>.fromOpaque(storage).takeUnretainedValue()
-                let status = processor.process(
-                    tap: tap,
-                    numberFrames: numberFrames,
-                    bufferListInOut: bufferListInOut,
-                    numberFramesOut: numberFramesOut,
-                    flagsOut: flagsOut
-                )
-                if status != noErr {
-                    numberFramesOut.pointee = 0
-                    flagsOut.pointee = 0
-                }
-            }
-        )
-
-        var tap: Unmanaged<MTAudioProcessingTap>?
-        let status = MTAudioProcessingTapCreate(
-            kCFAllocatorDefault,
-            &callbacks,
-            kMTAudioProcessingTapCreationFlag_PostEffects,
-            &tap
-        )
-        guard status == noErr else { return nil }
-        return tap?.takeRetainedValue()
-    }
-
-    private func prepare(with format: AudioStreamBasicDescription) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        sampleRate = format.mSampleRate
-        channelsPerFrame = max(Int(format.mChannelsPerFrame), 1)
-        bitsPerChannel = format.mBitsPerChannel
-        isFloat = (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0
-        isInterleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-        coefficients = Self.makeCoefficients(sampleRate: sampleRate, gains: gains)
-        states = Array(
-            repeating: Array(repeating: LXBiquadState(), count: coefficients.count),
-            count: channelsPerFrame
-        )
-    }
-
-    private func unprepare() {
-        lock.lock()
-        defer { lock.unlock() }
-
-        sampleRate = 0
-        channelsPerFrame = 0
-        bitsPerChannel = 0
-        isFloat = false
-        isInterleaved = false
-        states.removeAll(keepingCapacity: false)
-        coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
-    }
-
-    private func process(
-        tap: MTAudioProcessingTap,
-        numberFrames: CMItemCount,
-        bufferListInOut: UnsafeMutablePointer<AudioBufferList>,
-        numberFramesOut: UnsafeMutablePointer<CMItemCount>,
-        flagsOut: UnsafeMutablePointer<MTAudioProcessingTapFlags>
-    ) -> OSStatus {
-        let status = MTAudioProcessingTapGetSourceAudio(
-            tap,
-            numberFrames,
-            bufferListInOut,
-            flagsOut,
-            nil,
-            numberFramesOut
-        )
-        guard status == noErr else { return status }
-
-        let frameCount = Int(numberFramesOut.pointee)
-        guard frameCount > 0 else { return noErr }
-
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard enabled, channelsPerFrame > 0, coefficients.contains(where: { !$0.isBypass }) else {
-            return noErr
-        }
-
-        let audioBuffers = UnsafeMutableAudioBufferListPointer(bufferListInOut)
-        if isFloat && bitsPerChannel == 32 {
-            processFloat32(audioBuffers, frameCount: frameCount)
-        } else if !isFloat && bitsPerChannel == 16 {
-            processInt16(audioBuffers, frameCount: frameCount)
-        } else if !isFloat && bitsPerChannel == 32 {
-            processInt32(audioBuffers, frameCount: frameCount)
-        }
-
-        return noErr
-    }
-
-    private func processFloat32(_ audioBuffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
-        if isInterleaved {
-            guard let audioBuffer = audioBuffers.first,
-                  let data = audioBuffer.mData?.assumingMemoryBound(to: Float.self) else { return }
-
-            for frame in 0..<frameCount {
-                let baseIndex = frame * channelsPerFrame
-                for channel in 0..<channelsPerFrame {
-                    data[baseIndex + channel] = processSample(data[baseIndex + channel], channel: channel)
-                }
-            }
-            return
-        }
-
-        let availableChannels = min(audioBuffers.count, channelsPerFrame)
-        for channel in 0..<availableChannels {
-            guard let data = audioBuffers[channel].mData?.assumingMemoryBound(to: Float.self) else { continue }
-            for frame in 0..<frameCount {
-                data[frame] = processSample(data[frame], channel: channel)
-            }
-        }
-    }
-
-    private func processInt16(_ audioBuffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
-        let scale = Float(Int16.max)
-        if isInterleaved {
-            guard let audioBuffer = audioBuffers.first,
-                  let data = audioBuffer.mData?.assumingMemoryBound(to: Int16.self) else { return }
-
-            for frame in 0..<frameCount {
-                let baseIndex = frame * channelsPerFrame
-                for channel in 0..<channelsPerFrame {
-                    let index = baseIndex + channel
-                    let sample = Float(data[index]) / scale
-                    data[index] = Int16(clamping: Int(processSample(sample, channel: channel) * scale))
-                }
-            }
-            return
-        }
-
-        let availableChannels = min(audioBuffers.count, channelsPerFrame)
-        for channel in 0..<availableChannels {
-            guard let data = audioBuffers[channel].mData?.assumingMemoryBound(to: Int16.self) else { continue }
-            for frame in 0..<frameCount {
-                let sample = Float(data[frame]) / scale
-                data[frame] = Int16(clamping: Int(processSample(sample, channel: channel) * scale))
-            }
-        }
-    }
-
-    private func processInt32(_ audioBuffers: UnsafeMutableAudioBufferListPointer, frameCount: Int) {
-        let scale = Float(Int32.max)
-        if isInterleaved {
-            guard let audioBuffer = audioBuffers.first,
-                  let data = audioBuffer.mData?.assumingMemoryBound(to: Int32.self) else { return }
-
-            for frame in 0..<frameCount {
-                let baseIndex = frame * channelsPerFrame
-                for channel in 0..<channelsPerFrame {
-                    let index = baseIndex + channel
-                    let sample = Float(data[index]) / scale
-                    data[index] = Int32(clamping: Int(processSample(sample, channel: channel) * scale))
-                }
-            }
-            return
-        }
-
-        let availableChannels = min(audioBuffers.count, channelsPerFrame)
-        for channel in 0..<availableChannels {
-            guard let data = audioBuffers[channel].mData?.assumingMemoryBound(to: Int32.self) else { continue }
-            for frame in 0..<frameCount {
-                let sample = Float(data[frame]) / scale
-                data[frame] = Int32(clamping: Int(processSample(sample, channel: channel) * scale))
-            }
-        }
-    }
-
-    private func processSample(_ sample: Float, channel: Int) -> Float {
-        guard channel < states.count else { return sample }
-
-        var output = sample
-        for bandIndex in coefficients.indices {
-            let coeff = coefficients[bandIndex]
-            if coeff.isBypass { continue }
-
-            var state = states[channel][bandIndex]
-            let filtered = coeff.b0 * output + state.z1
-            state.z1 = coeff.b1 * output - coeff.a1 * filtered + state.z2
-            state.z2 = coeff.b2 * output - coeff.a2 * filtered
-            states[channel][bandIndex] = state
-            output = filtered
-        }
-
-        return min(max(output, -1), 1)
-    }
-
-    static func normalizeGains(_ gains: [Float]) -> [Float] {
-        var normalized = Array(repeating: Float(0), count: lxSoundEffectBandFrequencies.count)
-        for index in 0..<normalized.count {
-            normalized[index] = index < gains.count ? gains[index] : 0
-        }
-        return normalized
-    }
-
-    private static func makeCoefficients(sampleRate: Double, gains: [Float]) -> [LXBiquadCoefficients] {
-        guard sampleRate > 0 else {
-            return Array(repeating: .bypass, count: lxSoundEffectBandFrequencies.count)
-        }
-
-        let q: Float = 1.41
-        return lxSoundEffectBandFrequencies.enumerated().map { index, frequency in
-            let gain = index < gains.count ? gains[index] : 0
-            if abs(gain) < 0.01 { return .bypass }
-
-            let amplitude = pow(10, gain / 40)
-            let omega = 2 * Float.pi * frequency / Float(sampleRate)
-            let cosOmega = cos(omega)
-            let sinOmega = sin(omega)
-            let alpha = sinOmega / (2 * q)
-
-            let b0 = 1 + alpha * amplitude
-            let b1 = -2 * cosOmega
-            let b2 = 1 - alpha * amplitude
-            let a0 = 1 + alpha / amplitude
-            let a1 = -2 * cosOmega
-            let a2 = 1 - alpha / amplitude
-
-            return LXBiquadCoefficients(
-                b0: b0 / a0,
-                b1: b1 / a0,
-                b2: b2 / a0,
-                a1: a1 / a0,
-                a2: a2 / a0
-            )
-        }
-    }
-}
-`
+const equalizerAudioMixSwiftSource = fs.readFileSync(path.join(rootPath, 'patches/ios/LXEqualizerAudioMix.swift'), 'utf8')
 
 /**
  * @typedef {{ from: string, to: string }} PatchChange
@@ -686,6 +368,171 @@ private let lxTrackPlayerLifecycleNotification = Notification.Name("LXTrackPlaye
 `,
         to: `    func handleAudioPlayerQueueIndexChange(previousIndex: Int?, nextIndex: Int?) {
         refreshEqualizerAudioMix()
+        var dictionary: [String: Any] = [ "position": player.currentTime ]
+`,
+      },
+    ],
+  },
+  {
+    filePath: 'node_modules/react-native-track-player/ios/RNTrackPlayer/RNTrackPlayer.swift',
+    changes: [
+      {
+        from: `    private var hasInitialized = false
+    private let player = QueuedAudioPlayer()
+    private var equalizerEnabled = false
+    private var equalizerGains = LXEqualizerAudioMixController.normalizeGains([])
+    private var equalizerTapProcessor: LXEqualizerAudioMixController?
+    private weak var equalizedPlayerItem: AVPlayerItem?
+`,
+        to: `    private var hasInitialized = false
+    private let player = QueuedAudioPlayer()
+    private var soundEffectConfig = LXSoundEffectConfiguration()
+    private var soundEffectTapProcessor: LXEqualizerAudioMixController?
+    private weak var soundEffectPlayerItem: AVPlayerItem?
+`,
+      },
+      {
+        from: `        self.player.stop()
+        equalizedPlayerItem = nil
+        equalizerTapProcessor = nil
+        self.player.nowPlayingInfoController.clear()
+`,
+        to: `        self.player.stop()
+        soundEffectPlayerItem?.audioMix = nil
+        soundEffectPlayerItem = nil
+        soundEffectTapProcessor = nil
+        self.player.nowPlayingInfoController.clear()
+`,
+      },
+      {
+        from: `        player.stop()
+        equalizedPlayerItem = nil
+        equalizerTapProcessor = nil
+        postLifecycleEvent("reset", state: .idle, position: 0, rate: 0)
+`,
+        to: `        player.stop()
+        soundEffectPlayerItem?.audioMix = nil
+        soundEffectPlayerItem = nil
+        soundEffectTapProcessor = nil
+        postLifecycleEvent("reset", state: .idle, position: 0, rate: 0)
+`,
+      },
+      {
+        from: `    @objc private func handleSoundEffectConfigChanged(_ notification: Notification) {
+        applySoundEffectConfig(notification.userInfo)
+        refreshEqualizerAudioMix()
+    }
+
+    private func applySoundEffectConfig(_ userInfo: [AnyHashable: Any]?) {
+        equalizerEnabled = userInfo?["enabled"] as? Bool ?? false
+        let inputGains = userInfo?["gains"] as? [NSNumber] ?? []
+        equalizerGains = LXEqualizerAudioMixController.normalizeGains(inputGains.map { $0.floatValue })
+        equalizerTapProcessor?.updateConfig(enabled: equalizerEnabled, gains: equalizerGains)
+    }
+
+    private func refreshEqualizerAudioMix() {
+        guard let currentItem = player.currentPlayerItem else {
+            equalizedPlayerItem = nil
+            equalizerTapProcessor = nil
+            return
+        }
+
+        if equalizedPlayerItem === currentItem, let processor = equalizerTapProcessor {
+            processor.updateConfig(enabled: equalizerEnabled, gains: equalizerGains)
+            return
+        }
+
+        guard equalizerEnabled else {
+            equalizedPlayerItem = nil
+            equalizerTapProcessor = nil
+            return
+        }
+
+        let processor = LXEqualizerAudioMixController(enabled: equalizerEnabled, gains: equalizerGains)
+        guard let audioMix = processor.makeAudioMix(for: currentItem.asset) else {
+            equalizedPlayerItem = nil
+            equalizerTapProcessor = nil
+            return
+        }
+
+        currentItem.audioMix = audioMix
+        equalizedPlayerItem = currentItem
+        equalizerTapProcessor = processor
+    }
+`,
+        to: `    @objc private func handleSoundEffectConfigChanged(_ notification: Notification) {
+        soundEffectConfig = LXSoundEffectConfiguration.fromUserInfo(notification.userInfo)
+        soundEffectTapProcessor?.updateConfig(soundEffectConfig)
+        refreshSoundEffectAudioMix()
+    }
+
+    private func refreshSoundEffectAudioMix() {
+        guard let currentItem = player.currentPlayerItem else {
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        if soundEffectPlayerItem !== currentItem {
+            soundEffectPlayerItem?.audioMix = nil
+        }
+
+        if let processor = soundEffectTapProcessor, soundEffectPlayerItem === currentItem {
+            processor.updateConfig(soundEffectConfig)
+            if soundEffectConfig.isActive {
+                if currentItem.audioMix == nil, let audioMix = processor.makeAudioMix(for: currentItem.asset) {
+                    currentItem.audioMix = audioMix
+                }
+            } else {
+                currentItem.audioMix = nil
+                soundEffectTapProcessor = nil
+                soundEffectPlayerItem = nil
+            }
+            return
+        }
+
+        guard soundEffectConfig.isActive else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        let processor = LXEqualizerAudioMixController(config: soundEffectConfig)
+        guard let audioMix = processor.makeAudioMix(for: currentItem.asset) else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        currentItem.audioMix = audioMix
+        soundEffectPlayerItem = currentItem
+        soundEffectTapProcessor = processor
+    }
+`,
+      },
+      {
+        from: `    func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
+        refreshEqualizerAudioMix()
+        sendEvent(withName: "playback-state", body: ["state": state.rawValue])
+        postLifecycleEvent("state", state: state)
+    }
+`,
+        to: `    func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
+        refreshSoundEffectAudioMix()
+        sendEvent(withName: "playback-state", body: ["state": state.rawValue])
+        postLifecycleEvent("state", state: state)
+    }
+`,
+      },
+      {
+        from: `    func handleAudioPlayerQueueIndexChange(previousIndex: Int?, nextIndex: Int?) {
+        refreshEqualizerAudioMix()
+        var dictionary: [String: Any] = [ "position": player.currentTime ]
+`,
+        to: `    func handleAudioPlayerQueueIndexChange(previousIndex: Int?, nextIndex: Int?) {
+        refreshSoundEffectAudioMix()
         var dictionary: [String: Any] = [ "position": player.currentTime ]
 `,
       },

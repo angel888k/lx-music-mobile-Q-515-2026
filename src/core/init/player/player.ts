@@ -58,7 +58,7 @@ export default async(setting: LX.AppSetting) => {
       const playMusicInfo = playerState.playMusicInfo
       if (newValue == 'random' && playMusicInfo.musicInfo && !playMusicInfo.isTempPlay) addPlayedList({ ...(playMusicInfo as LX.Player.PlayMusicInfo) })
     }
-    if (keys.some(soundEffectController.isSettingKey)) void soundEffectController.applyCurrentEqualizerConfig()
+    if (keys.some(soundEffectController.isSettingKey)) void soundEffectController.applyCurrentConfig()
   }
 
 
@@ -71,7 +71,7 @@ export default async(setting: LX.AppSetting) => {
   global.app_event.on('musicToggled', refreshNowPlaying)
   global.app_event.on('lyricUpdated', refreshNowPlaying)
   global.state_event.on('configUpdated', handleConfigUpdated)
-  void soundEffectController.applyCurrentEqualizerConfig()
+  void soundEffectController.applyCurrentConfig()
 
   if (Platform.OS == 'ios') {
     onHeadphonesDisconnected(() => {

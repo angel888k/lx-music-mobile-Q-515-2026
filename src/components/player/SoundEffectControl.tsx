@@ -10,53 +10,28 @@ import { createStyle } from '@/utils/tools'
 import { useTheme } from '@/store/theme/hook'
 import { useSetting } from '@/store/setting/hook'
 import {
-  createEqualizerGainsRecord,
+  createConvolutionSettingPatch,
   createCustomBandSettingPatch,
+  createEqualizerGainsRecord,
   createPresetSettingPatch,
   equalizerFrequencies,
   equalizerPresets,
   getEqualizerGains,
   normalizeEqualizerPresetId,
   soundEffectController,
+  soundEffectConvolutionOptions,
 } from '@/plugins/player/soundEffect'
 
 const minGain = -15
 const maxGain = 15
+const minPitchPlaybackRate = 0.5
+const maxPitchPlaybackRate = 1.5
+
 type PreviewGains = Record<typeof equalizerFrequencies[number], number>
 type LayoutMode = 'split' | 'stacked'
-type PlaceholderConvolutionId =
-  | 'telephone'
-  | 'church'
-  | 'hall'
-  | 'cinema'
-  | 'restaurant'
-  | 'bathroom'
-  | 'indoor'
-  | 'stereo'
-  | 'matrix1'
-  | 'matrix2'
-  | 'cardioid'
-  | 'magnetic'
-  | 'spring'
-
-const convolutionOptions: Array<{ id: PlaceholderConvolutionId, labelKey: string }> = [
-  { id: 'telephone', labelKey: 'setting_play_sound_effect_env_telephone' },
-  { id: 'church', labelKey: 'setting_play_sound_effect_env_church' },
-  { id: 'hall', labelKey: 'setting_play_sound_effect_env_hall' },
-  { id: 'cinema', labelKey: 'setting_play_sound_effect_env_cinema' },
-  { id: 'restaurant', labelKey: 'setting_play_sound_effect_env_restaurant' },
-  { id: 'bathroom', labelKey: 'setting_play_sound_effect_env_bathroom' },
-  { id: 'indoor', labelKey: 'setting_play_sound_effect_env_indoor' },
-  { id: 'stereo', labelKey: 'setting_play_sound_effect_env_stereo' },
-  { id: 'matrix1', labelKey: 'setting_play_sound_effect_env_matrix_1' },
-  { id: 'matrix2', labelKey: 'setting_play_sound_effect_env_matrix_2' },
-  { id: 'cardioid', labelKey: 'setting_play_sound_effect_env_cardioid' },
-  { id: 'magnetic', labelKey: 'setting_play_sound_effect_env_magnetic' },
-  { id: 'spring', labelKey: 'setting_play_sound_effect_env_spring' },
-]
 
 const formatGain = (gain: number) => `${gain > 0 ? '+' : ''}${Number.isInteger(gain) ? gain : gain.toFixed(1)}db`
-const formatPercent = (value: number) => `${Math.round(value)}%`
+const formatPercent = (value: number) => `${Math.round(value) * 10}%`
 const formatPlaybackRate = (value: number) => `${value.toFixed(2)}x`
 const formatPlain = (value: number) => `${Math.round(value)}`
 
@@ -244,61 +219,63 @@ const EqualizerSection = memo(({
 })
 
 const EnvironmentSection = memo(({
-  selectedConvolutionId,
-  originGain,
-  effectGain,
+  selectedSource,
+  mainGain,
+  sendGain,
   onToggleConvolution,
-  onOriginGainChange,
-  onEffectGainChange,
+  onMainGainChange,
+  onSendGainChange,
 }: {
-  selectedConvolutionId: PlaceholderConvolutionId | null
-  originGain: number
-  effectGain: number
-  onToggleConvolution: (id: PlaceholderConvolutionId) => void
-  onOriginGainChange: (value: number) => void
-  onEffectGainChange: (value: number) => void
+  selectedSource: string
+  mainGain: number
+  sendGain: number
+  onToggleConvolution: (source: string) => void
+  onMainGainChange: (value: number) => void
+  onSendGainChange: (value: number) => void
 }) => {
   const t = useI18n()
-  const theme = useTheme()
+  const disabledConvolution = !selectedSource
 
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_environment')}</Text>
       <View style={styles.envList}>
-        {convolutionOptions.map(item => (
+        {soundEffectConvolutionOptions.map(item => (
           <PlaceholderCheckbox
             key={item.id}
-            checked={selectedConvolutionId == item.id}
-            label={t(item.labelKey as never)}
-            onPress={() => { onToggleConvolution(item.id) }}
+            checked={selectedSource == item.source}
+            label={t(item.labelKey)}
+            onPress={() => { onToggleConvolution(item.source) }}
           />
         ))}
       </View>
 
-      <View style={styles.placeholderGroup}>
+      <View style={{ ...styles.placeholderGroup, opacity: disabledConvolution ? 0.45 : 1 }}>
         <PlaceholderSliderRow
           label={t('setting_play_sound_effect_environment_origin_gain')}
-          value={originGain}
+          value={mainGain}
           minimumValue={0}
-          maximumValue={100}
+          maximumValue={50}
           step={1}
-          onValueChange={value => { onOriginGainChange(Number(value)) }}
+          onValueChange={value => {
+            if (disabledConvolution) return
+            onMainGainChange(Number(value))
+          }}
           formatter={formatPercent}
         />
         <PlaceholderSliderRow
           label={t('setting_play_sound_effect_environment_effect_gain')}
-          value={effectGain}
+          value={sendGain}
           minimumValue={0}
-          maximumValue={300}
+          maximumValue={50}
           step={1}
-          onValueChange={value => { onEffectGainChange(Number(value)) }}
+          onValueChange={value => {
+            if (disabledConvolution) return
+            onSendGainChange(Number(value))
+          }}
           formatter={formatPercent}
         />
       </View>
-
-      <TouchableOpacity activeOpacity={0.7} style={styles.addPresetButton}>
-        <Text size={16} color={theme['c-font-label']}>+</Text>
-      </TouchableOpacity>
     </View>
   )
 })
@@ -329,8 +306,8 @@ const PitchSection = memo(({
       <PlaceholderSliderRow
         label=""
         value={playbackRate}
-        minimumValue={0.5}
-        maximumValue={2}
+        minimumValue={minPitchPlaybackRate}
+        maximumValue={maxPitchPlaybackRate}
         step={0.01}
         onValueChange={value => { onValueChange(Number(value)) }}
         formatter={formatPlaybackRate}
@@ -370,7 +347,7 @@ const SurroundSection = memo(({
         <PlaceholderSliderRow
           label={t('setting_play_sound_effect_surround_speed')}
           value={speed}
-          minimumValue={0}
+          minimumValue={1}
           maximumValue={50}
           step={1}
           onValueChange={value => { onSpeedChange(Number(value)) }}
@@ -379,8 +356,8 @@ const SurroundSection = memo(({
         <PlaceholderSliderRow
           label={t('setting_play_sound_effect_surround_distance')}
           value={distance}
-          minimumValue={0}
-          maximumValue={10}
+          minimumValue={1}
+          maximumValue={30}
           step={1}
           onValueChange={value => { onDistanceChange(Number(value)) }}
           formatter={formatPlain}
@@ -399,14 +376,14 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
   const dividerColor = theme['c-primary-alpha-500']
   const setting = useSetting()
   const [previewGains, setPreviewGains] = useState<PreviewGains>(() => getEqualizerGains(setting))
-  const [selectedConvolutionId, setSelectedConvolutionId] = useState<PlaceholderConvolutionId | null>(null)
-  const [originGain, setOriginGain] = useState(0)
-  const [effectGain, setEffectGain] = useState(300)
-  const [playbackRate, setPlaybackRate] = useState(1)
-  const [surroundEnabled, setSurroundEnabled] = useState(false)
-  const [surroundSpeed, setSurroundSpeed] = useState(25)
-  const [soundDistance, setSoundDistance] = useState(5)
   const presetId = normalizeEqualizerPresetId(setting['player.soundEffect.preset'])
+  const convolutionSource = setting['player.soundEffect.convolution.fileName']
+  const convolutionMainGain = setting['player.soundEffect.convolution.mainGain']
+  const convolutionSendGain = setting['player.soundEffect.convolution.sendGain']
+  const pitchPlaybackRate = setting['player.soundEffect.pitchShifter.playbackRate']
+  const surroundEnabled = setting['player.soundEffect.panner.enable']
+  const surroundSpeed = setting['player.soundEffect.panner.speed']
+  const soundDistance = setting['player.soundEffect.panner.soundR']
 
   useEffect(() => {
     setPreviewGains(getEqualizerGains(setting))
@@ -440,17 +417,53 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
     updateSetting(createCustomBandSettingPatch(frequency, value, setting))
   }
 
+  const handleToggleConvolution = (source: string) => {
+    if (convolutionSource == source) {
+      updateSetting({ 'player.soundEffect.convolution.fileName': '' })
+      return
+    }
+    updateSetting(createConvolutionSettingPatch(source))
+  }
+
+  const handleUpdateConvolutionMainGain = (value: number) => {
+    updateSetting({ 'player.soundEffect.convolution.mainGain': Math.round(value) })
+  }
+
+  const handleUpdateConvolutionSendGain = (value: number) => {
+    updateSetting({ 'player.soundEffect.convolution.sendGain': Math.round(value) })
+  }
+
+  const handleResetPitch = () => {
+    updateSetting({ 'player.soundEffect.pitchShifter.playbackRate': 1 })
+  }
+
+  const handleUpdatePitch = (value: number) => {
+    updateSetting({ 'player.soundEffect.pitchShifter.playbackRate': value })
+  }
+
+  const handleToggleSurround = () => {
+    updateSetting({ 'player.soundEffect.panner.enable': !surroundEnabled })
+  }
+
+  const handleUpdateSurroundSpeed = (value: number) => {
+    updateSetting({ 'player.soundEffect.panner.speed': Math.round(value) })
+  }
+
+  const handleUpdateSurroundDistance = (value: number) => {
+    updateSetting({ 'player.soundEffect.panner.soundR': Math.round(value) })
+  }
+
   if (layoutMode == 'stacked') {
     return (
       <View style={styles.container}>
         <View style={styles.sectionBlock}>
           <EnvironmentSection
-            selectedConvolutionId={selectedConvolutionId}
-            originGain={originGain}
-            effectGain={effectGain}
-            onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
-            onOriginGainChange={setOriginGain}
-            onEffectGainChange={setEffectGain}
+            selectedSource={convolutionSource}
+            mainGain={convolutionMainGain}
+            sendGain={convolutionSendGain}
+            onToggleConvolution={handleToggleConvolution}
+            onMainGainChange={handleUpdateConvolutionMainGain}
+            onSendGainChange={handleUpdateConvolutionSendGain}
           />
         </View>
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
@@ -465,16 +478,16 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
           />
         </View>
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
-          <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
+          <PitchSection playbackRate={pitchPlaybackRate} onReset={handleResetPitch} onValueChange={handleUpdatePitch} />
         </View>
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
           <SurroundSection
             enabled={surroundEnabled}
             speed={surroundSpeed}
             distance={soundDistance}
-            onToggle={() => { setSurroundEnabled(value => !value) }}
-            onSpeedChange={setSurroundSpeed}
-            onDistanceChange={setSoundDistance}
+            onToggle={handleToggleSurround}
+            onSpeedChange={handleUpdateSurroundSpeed}
+            onDistanceChange={handleUpdateSurroundDistance}
           />
         </View>
         {showTip ? (
@@ -492,25 +505,25 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
         <View style={styles.leftColumn}>
           <View style={styles.sectionBlock}>
             <EnvironmentSection
-              selectedConvolutionId={selectedConvolutionId}
-              originGain={originGain}
-              effectGain={effectGain}
-              onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
-              onOriginGainChange={setOriginGain}
-              onEffectGainChange={setEffectGain}
+              selectedSource={convolutionSource}
+              mainGain={convolutionMainGain}
+              sendGain={convolutionSendGain}
+              onToggleConvolution={handleToggleConvolution}
+              onMainGainChange={handleUpdateConvolutionMainGain}
+              onSendGainChange={handleUpdateConvolutionSendGain}
             />
           </View>
           <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
-            <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
+            <PitchSection playbackRate={pitchPlaybackRate} onReset={handleResetPitch} onValueChange={handleUpdatePitch} />
           </View>
           <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
             <SurroundSection
               enabled={surroundEnabled}
               speed={surroundSpeed}
               distance={soundDistance}
-              onToggle={() => { setSurroundEnabled(value => !value) }}
-              onSpeedChange={setSurroundSpeed}
-              onDistanceChange={setSoundDistance}
+              onToggle={handleToggleSurround}
+              onSpeedChange={handleUpdateSurroundSpeed}
+              onDistanceChange={handleUpdateSurroundDistance}
             />
           </View>
           {showTip ? (
@@ -613,7 +626,6 @@ const styles = createStyle({
   },
   placeholderGroup: {
     gap: 8,
-    marginBottom: 10,
   },
   placeholderSliderItem: {
     gap: 2,
@@ -624,18 +636,8 @@ const styles = createStyle({
     width: '100%',
   },
   placeholderValue: {
-    width: 38,
+    width: 48,
     textAlign: 'right',
-  },
-  addPresetButton: {
-    width: 28,
-    height: 24,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderStyle: 'dashed',
-    borderColor: 'rgba(120, 180, 160, 0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   tip: {
     marginTop: 10,

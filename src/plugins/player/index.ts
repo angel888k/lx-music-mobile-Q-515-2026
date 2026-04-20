@@ -46,7 +46,7 @@ const initial = async({ volume, playRate, cacheSize, isHandleAudioFocus, isEnabl
   await updateOptions()
   await setVolume(volume)
   await setPlaybackRate(playRate)
-  await soundEffectController.applyCurrentEqualizerConfig()
+  await soundEffectController.applyCurrentConfig()
   // listenEvent()
 }
 
