@@ -601,7 +601,7 @@ final class LXEqualizerAudioMixController {
         guard config.hasPanner, activeChannels >= 2, sampleRate > 0 else { return }
 
         let amplitude = min(max(config.pannerSoundR / 10, 0), 1)
-        let phaseStep = Float((Double.pi / 18.0) / (max(Double(config.pannerSpeed) * 0.002, 0.02) * sampleRate))
+        let phaseStep = Float((Double.pi / 180.0) / (max(Double(config.pannerSpeed) * 0.002, 0.02) * sampleRate))
         let pan = sin(Float(processedSamples) * phaseStep) * amplitude
         let leftGain: Float = pan > 0 ? 1 - pan : 1
         let rightGain: Float = pan < 0 ? 1 + pan : 1

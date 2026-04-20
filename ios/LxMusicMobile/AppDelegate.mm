@@ -1276,7 +1276,7 @@ RCT_EXPORT_MODULE();
   StreamingFlacPlayerModule *module = self;
   dispatch_source_set_event_handler(timer, ^{
     if (module == nil || module.soundEffectMixerNode == nil) return;
-    module.pannerPhase += (float)(M_PI / 18.0);
+    module.pannerPhase += (float)(M_PI / 180.0);
     if (module.pannerPhase > (float)(M_PI * 2.0)) module.pannerPhase -= (float)(M_PI * 2.0);
     module.soundEffectMixerNode.pan = sinf(module.pannerPhase) * amplitude;
   });
