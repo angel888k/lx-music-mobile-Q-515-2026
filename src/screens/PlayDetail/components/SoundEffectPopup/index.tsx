@@ -8,7 +8,9 @@ export interface SoundEffectPopupType {
   show: () => void
 }
 
-export default forwardRef<SoundEffectPopupType, Omit<PopupProps, 'children'>>((props, ref) => {
+export default forwardRef<SoundEffectPopupType, Omit<PopupProps, 'children'> & {
+  layoutMode?: 'split' | 'stacked'
+}>(({ layoutMode = 'split', ...props }, ref) => {
   const [visible, setVisible] = useState(false)
   const popupRef = useRef<PopupType>(null)
   const t = useI18n()
@@ -29,7 +31,7 @@ export default forwardRef<SoundEffectPopupType, Omit<PopupProps, 'children'>>((p
     <Popup ref={popupRef} title={t('setting_play_sound_effect')} {...props}>
       <ScrollView>
         <View onStartShouldSetResponder={() => true}>
-          <SoundEffectControl showTip={false} />
+          <SoundEffectControl showTip={false} layoutMode={layoutMode} />
         </View>
       </ScrollView>
     </Popup>

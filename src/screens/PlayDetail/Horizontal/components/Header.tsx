@@ -56,10 +56,10 @@ export default memo(() => {
         </TouchableOpacity>
         <Title />
         <CommentBtn />
-        <Btn icon="leaderboard" color={isSoundEffectActive(setting) ? theme['c-primary-font-active'] : undefined} onPress={showSoundEffect} />
-        <Btn icon="slider" onPress={showSetting} />
+        <Btn icon="slider" color={isSoundEffectActive(setting) ? theme['c-primary-font-active'] : undefined} onPress={showSoundEffect} />
+        <Btn icon="setting" onPress={showSetting} />
       </View>
-      <SoundEffectPopup ref={soundEffectPopupRef} position="left" />
+      <SoundEffectPopup ref={soundEffectPopupRef} position="bottom" layoutMode="split" />
       <SettingPopup ref={popupRef} position="left" direction="horizontal" />
     </View>
   )

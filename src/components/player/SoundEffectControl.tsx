@@ -23,6 +23,7 @@ import {
 const minGain = -15
 const maxGain = 15
 type PreviewGains = Record<typeof equalizerFrequencies[number], number>
+type LayoutMode = 'split' | 'stacked'
 type PlaceholderConvolutionId =
   | 'telephone'
   | 'church'
@@ -69,9 +70,14 @@ const PlaceholderCheckbox = memo(({
   onPress: () => void
 }) => {
   const theme = useTheme()
+
   return (
     <TouchableOpacity style={styles.placeholderCheckbox} activeOpacity={0.7} onPress={onPress}>
-      <Icon name={checked ? 'checkbox-marked' : 'checkbox-blank-outline'} size={15} color={checked ? theme['c-primary-font-active'] : theme['c-font-label']} />
+      <Icon
+        name={checked ? 'checkbox-marked' : 'checkbox-blank-outline'}
+        size={15}
+        color={checked ? theme['c-primary-font-active'] : theme['c-font-label']}
+      />
       <Text size={13}>{label}</Text>
     </TouchableOpacity>
   )
@@ -97,9 +103,10 @@ const PlaceholderSliderRow = memo(({
   formatter: (value: number) => string
 }) => {
   const theme = useTheme()
+
   return (
     <View style={styles.placeholderSliderItem}>
-      <Text size={13}>{label}</Text>
+      {label ? <Text size={13}>{label}</Text> : null}
       <View style={styles.placeholderSliderContent}>
         <Slider
           minimumValue={minimumValue}
@@ -115,8 +122,268 @@ const PlaceholderSliderRow = memo(({
   )
 })
 
-export default memo(({ showTip = true }: {
+const EqualizerSection = memo(({
+  presetId,
+  previewGains,
+  onReset,
+  onPresetPress,
+  onValueChange,
+  onSlidingComplete,
+  layoutMode,
+}: {
+  presetId: LX.SoundEffectPresetId
+  previewGains: PreviewGains
+  onReset: () => void
+  onPresetPress: (presetId: Exclude<LX.SoundEffectPresetId, 'custom'>) => void
+  onValueChange: (frequency: typeof equalizerFrequencies[number], value: number) => void
+  onSlidingComplete: (frequency: typeof equalizerFrequencies[number], value: number) => void
+  layoutMode: LayoutMode
+}) => {
+  const t = useI18n()
+  const theme = useTheme()
+
+  const equalizerRows = useMemo(() => {
+    const result: Array<Array<typeof equalizerFrequencies[number]>> = []
+    for (let index = 0; index < equalizerFrequencies.length; index += 2) {
+      result.push(equalizerFrequencies.slice(index, index + 2))
+    }
+    return result
+  }, [])
+
+  return (
+    <View style={styles.section}>
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_equalizer')}</Text>
+        <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+          <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
+        </TouchableOpacity>
+      </View>
+
+      {layoutMode == 'split'
+        ? (
+            <View style={styles.equalizerGrid}>
+              {equalizerRows.map((row, rowIndex) => (
+                <View key={rowIndex} style={styles.equalizerRow}>
+                  {row.map((frequency, frequencyIndex) => (
+                    <View
+                      key={frequency}
+                      style={{
+                        ...styles.equalizerItem,
+                        borderRightWidth: frequencyIndex == 0 ? 1 : 0,
+                        borderRightColor: theme['c-primary-alpha-900'],
+                      }}>
+                      <View style={styles.equalizerSliderRow}>
+                        <Text size={13} style={styles.equalizerLabel}>{frequency >= 1000 ? `${frequency / 1000}k` : `${frequency}`}</Text>
+                        <Slider
+                          minimumValue={minGain}
+                          maximumValue={maxGain}
+                          step={0.1}
+                          value={previewGains[frequency]}
+                          onValueChange={value => { onValueChange(frequency, Number(value)) }}
+                          onSlidingComplete={value => { onSlidingComplete(frequency, Number(value)) }}
+                        />
+                        <Text size={12} color={theme['c-font-label']} style={styles.equalizerValue}>{formatGain(previewGains[frequency])}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </View>
+              ))}
+            </View>
+          )
+        : (
+            <View style={styles.stackedEqualizerList}>
+              {equalizerFrequencies.map(frequency => (
+                <View key={frequency} style={styles.stackedEqualizerItem}>
+                  <View style={styles.equalizerSliderRow}>
+                    <Text size={13} style={styles.equalizerLabel}>{frequency >= 1000 ? `${frequency / 1000}k` : `${frequency}`}</Text>
+                    <Slider
+                      minimumValue={minGain}
+                      maximumValue={maxGain}
+                      step={0.1}
+                      value={previewGains[frequency]}
+                      onValueChange={value => { onValueChange(frequency, Number(value)) }}
+                      onSlidingComplete={value => { onSlidingComplete(frequency, Number(value)) }}
+                    />
+                    <Text size={12} color={theme['c-font-label']} style={styles.equalizerValue}>{formatGain(previewGains[frequency])}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
+
+      <View style={styles.presetList}>
+        {equalizerPresets.filter(preset => preset.id != 'none').map(preset => {
+          const isActive = preset.id == presetId
+          return (
+            <TouchableOpacity
+              key={preset.id}
+              activeOpacity={0.7}
+              style={{
+                ...styles.presetButton,
+                backgroundColor: isActive ? theme['c-button-background-selected'] : theme['c-button-background'],
+              }}
+              onPress={() => { onPresetPress(preset.id) }}>
+              <Text size={13} color={isActive ? theme['c-button-font-selected'] : theme['c-button-font']}>
+                {t(preset.nameKey)}
+              </Text>
+            </TouchableOpacity>
+          )
+        })}
+      </View>
+    </View>
+  )
+})
+
+const EnvironmentSection = memo(({
+  selectedConvolutionId,
+  originGain,
+  effectGain,
+  onToggleConvolution,
+  onOriginGainChange,
+  onEffectGainChange,
+}: {
+  selectedConvolutionId: PlaceholderConvolutionId | null
+  originGain: number
+  effectGain: number
+  onToggleConvolution: (id: PlaceholderConvolutionId) => void
+  onOriginGainChange: (value: number) => void
+  onEffectGainChange: (value: number) => void
+}) => {
+  const t = useI18n()
+  const theme = useTheme()
+
+  return (
+    <View style={styles.section}>
+      <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_environment')}</Text>
+      <View style={styles.envList}>
+        {convolutionOptions.map(item => (
+          <PlaceholderCheckbox
+            key={item.id}
+            checked={selectedConvolutionId == item.id}
+            label={t(item.labelKey as never)}
+            onPress={() => { onToggleConvolution(item.id) }}
+          />
+        ))}
+      </View>
+
+      <View style={styles.placeholderGroup}>
+        <PlaceholderSliderRow
+          label={t('setting_play_sound_effect_environment_origin_gain')}
+          value={originGain}
+          minimumValue={0}
+          maximumValue={100}
+          step={1}
+          onValueChange={value => { onOriginGainChange(Number(value)) }}
+          formatter={formatPercent}
+        />
+        <PlaceholderSliderRow
+          label={t('setting_play_sound_effect_environment_effect_gain')}
+          value={effectGain}
+          minimumValue={0}
+          maximumValue={300}
+          step={1}
+          onValueChange={value => { onEffectGainChange(Number(value)) }}
+          formatter={formatPercent}
+        />
+      </View>
+
+      <TouchableOpacity activeOpacity={0.7} style={styles.addPresetButton}>
+        <Text size={16} color={theme['c-font-label']}>+</Text>
+      </TouchableOpacity>
+    </View>
+  )
+})
+
+const PitchSection = memo(({
+  playbackRate,
+  onReset,
+  onValueChange,
+}: {
+  playbackRate: number
+  onReset: () => void
+  onValueChange: (value: number) => void
+}) => {
+  const t = useI18n()
+  const theme = useTheme()
+
+  return (
+    <View style={styles.section}>
+      <View style={styles.sectionHeader}>
+        <View style={styles.sectionHeaderTitle}>
+          <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_pitch')}</Text>
+          <Icon name="help" size={14} color={theme['c-font-label']} />
+        </View>
+        <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+          <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
+        </TouchableOpacity>
+      </View>
+      <PlaceholderSliderRow
+        label=""
+        value={playbackRate}
+        minimumValue={0.5}
+        maximumValue={2}
+        step={0.01}
+        onValueChange={value => { onValueChange(Number(value)) }}
+        formatter={formatPlaybackRate}
+      />
+    </View>
+  )
+})
+
+const SurroundSection = memo(({
+  enabled,
+  speed,
+  distance,
+  onToggle,
+  onSpeedChange,
+  onDistanceChange,
+}: {
+  enabled: boolean
+  speed: number
+  distance: number
+  onToggle: () => void
+  onSpeedChange: (value: number) => void
+  onDistanceChange: (value: number) => void
+}) => {
+  const t = useI18n()
+
+  return (
+    <View style={styles.section}>
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_surround')}</Text>
+        <PlaceholderCheckbox
+          checked={enabled}
+          label={t('setting_play_sound_effect_enable')}
+          onPress={onToggle}
+        />
+      </View>
+      <View style={{ opacity: enabled ? 1 : 0.45 }}>
+        <PlaceholderSliderRow
+          label={t('setting_play_sound_effect_surround_speed')}
+          value={speed}
+          minimumValue={0}
+          maximumValue={50}
+          step={1}
+          onValueChange={value => { onSpeedChange(Number(value)) }}
+          formatter={formatPlain}
+        />
+        <PlaceholderSliderRow
+          label={t('setting_play_sound_effect_surround_distance')}
+          value={distance}
+          minimumValue={0}
+          maximumValue={10}
+          step={1}
+          onValueChange={value => { onDistanceChange(Number(value)) }}
+          formatter={formatPlain}
+        />
+      </View>
+    </View>
+  )
+})
+
+export default memo(({ showTip = true, layoutMode = 'split' }: {
   showTip?: boolean
+  layoutMode?: LayoutMode
 }) => {
   const t = useI18n()
   const theme = useTheme()
@@ -129,15 +396,7 @@ export default memo(({ showTip = true }: {
   const [surroundEnabled, setSurroundEnabled] = useState(false)
   const [surroundSpeed, setSurroundSpeed] = useState(25)
   const [soundDistance, setSoundDistance] = useState(5)
-
   const presetId = normalizeEqualizerPresetId(setting['player.soundEffect.preset'])
-  const equalizerRows = useMemo(() => {
-    const result: Array<Array<typeof equalizerFrequencies[number]>> = []
-    for (let index = 0; index < equalizerFrequencies.length; index += 2) {
-      result.push(equalizerFrequencies.slice(index, index + 2))
-    }
-    return result
-  }, [])
 
   useEffect(() => {
     setPreviewGains(getEqualizerGains(setting))
@@ -171,107 +430,70 @@ export default memo(({ showTip = true }: {
     updateSetting(createCustomBandSettingPatch(frequency, value, setting))
   }
 
+  if (layoutMode == 'stacked') {
+    return (
+      <View style={styles.container}>
+        <EnvironmentSection
+          selectedConvolutionId={selectedConvolutionId}
+          originGain={originGain}
+          effectGain={effectGain}
+          onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
+          onOriginGainChange={setOriginGain}
+          onEffectGainChange={setEffectGain}
+        />
+        <View style={styles.sectionDivider} />
+        <EqualizerSection
+          presetId={presetId}
+          previewGains={previewGains}
+          onReset={handleReset}
+          onPresetPress={handlePresetPress}
+          onValueChange={handleValueChange}
+          onSlidingComplete={handleSlidingComplete}
+          layoutMode={layoutMode}
+        />
+        <View style={styles.sectionDivider} />
+        <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
+        <View style={styles.sectionDivider} />
+        <SurroundSection
+          enabled={surroundEnabled}
+          speed={surroundSpeed}
+          distance={soundDistance}
+          onToggle={() => { setSurroundEnabled(value => !value) }}
+          onSpeedChange={setSurroundSpeed}
+          onDistanceChange={setSoundDistance}
+        />
+        {showTip ? (
+          <View style={styles.tip}>
+            <Text size={12} color={theme['c-font-label']}>{t('setting_play_sound_effect_tip')}</Text>
+          </View>
+        ) : null}
+      </View>
+    )
+  }
+
   return (
     <View style={styles.container}>
       <View style={styles.layout}>
         <View style={styles.leftColumn}>
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_environment')}</Text>
-            <View style={styles.envList}>
-              {convolutionOptions.map(item => (
-                <PlaceholderCheckbox
-                  key={item.id}
-                  checked={selectedConvolutionId == item.id}
-                  label={t(item.labelKey as never)}
-                  onPress={() => {
-                    setSelectedConvolutionId(prev => prev == item.id ? null : item.id)
-                  }}
-                />
-              ))}
-            </View>
-
-            <View style={styles.placeholderGroup}>
-              <PlaceholderSliderRow
-                label={t('setting_play_sound_effect_environment_origin_gain')}
-                value={originGain}
-                minimumValue={0}
-                maximumValue={100}
-                step={1}
-                onValueChange={value => { setOriginGain(Number(value)) }}
-                formatter={formatPercent}
-              />
-              <PlaceholderSliderRow
-                label={t('setting_play_sound_effect_environment_effect_gain')}
-                value={effectGain}
-                minimumValue={0}
-                maximumValue={300}
-                step={1}
-                onValueChange={value => { setEffectGain(Number(value)) }}
-                formatter={formatPercent}
-              />
-            </View>
-
-            <TouchableOpacity activeOpacity={0.7} style={styles.addPresetButton}>
-              <Text size={16} color={theme['c-font-label']}>+</Text>
-            </TouchableOpacity>
-          </View>
-
+          <EnvironmentSection
+            selectedConvolutionId={selectedConvolutionId}
+            originGain={originGain}
+            effectGain={effectGain}
+            onToggleConvolution={(id) => { setSelectedConvolutionId(prev => prev == id ? null : id) }}
+            onOriginGainChange={setOriginGain}
+            onEffectGainChange={setEffectGain}
+          />
           <View style={styles.sectionDivider} />
-
-          <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <View style={styles.sectionHeaderTitle}>
-                <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_pitch')}</Text>
-                <Icon name="help" size={14} color={theme['c-font-label']} />
-              </View>
-              <TouchableOpacity activeOpacity={0.7} onPress={() => { setPlaybackRate(1) }} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
-                <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
-              </TouchableOpacity>
-            </View>
-            <PlaceholderSliderRow
-              label=""
-              value={playbackRate}
-              minimumValue={0.5}
-              maximumValue={2}
-              step={0.01}
-              onValueChange={value => { setPlaybackRate(Number(value)) }}
-              formatter={formatPlaybackRate}
-            />
-          </View>
-
+          <PitchSection playbackRate={playbackRate} onReset={() => { setPlaybackRate(1) }} onValueChange={setPlaybackRate} />
           <View style={styles.sectionDivider} />
-
-          <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_surround')}</Text>
-              <PlaceholderCheckbox
-                checked={surroundEnabled}
-                label={t('setting_play_sound_effect_enable')}
-                onPress={() => { setSurroundEnabled(value => !value) }}
-              />
-            </View>
-            <View style={{ opacity: surroundEnabled ? 1 : 0.45 }}>
-              <PlaceholderSliderRow
-                label={t('setting_play_sound_effect_surround_speed')}
-                value={surroundSpeed}
-                minimumValue={0}
-                maximumValue={50}
-                step={1}
-                onValueChange={value => { setSurroundSpeed(Number(value)) }}
-                formatter={formatPlain}
-              />
-              <PlaceholderSliderRow
-                label={t('setting_play_sound_effect_surround_distance')}
-                value={soundDistance}
-                minimumValue={0}
-                maximumValue={10}
-                step={1}
-                onValueChange={value => { setSoundDistance(Number(value)) }}
-                formatter={formatPlain}
-              />
-            </View>
-          </View>
-
+          <SurroundSection
+            enabled={surroundEnabled}
+            speed={surroundSpeed}
+            distance={soundDistance}
+            onToggle={() => { setSurroundEnabled(value => !value) }}
+            onSpeedChange={setSurroundSpeed}
+            onDistanceChange={setSoundDistance}
+          />
           {showTip ? (
             <View style={styles.tip}>
               <Text size={12} color={theme['c-font-label']}>{t('setting_play_sound_effect_tip')}</Text>
@@ -282,61 +504,15 @@ export default memo(({ showTip = true }: {
         <View style={styles.columnDivider} />
 
         <View style={styles.rightColumn}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_equalizer')}</Text>
-            <TouchableOpacity activeOpacity={0.7} onPress={handleReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
-              <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
-            </TouchableOpacity>
-          </View>
-
-          <View style={styles.equalizerGrid}>
-            {equalizerRows.map((row, rowIndex) => (
-              <View key={rowIndex} style={styles.equalizerRow}>
-                {row.map((frequency, frequencyIndex) => (
-                  <View
-                    key={frequency}
-                    style={{
-                      ...styles.equalizerItem,
-                      borderRightWidth: frequencyIndex == 0 ? 1 : 0,
-                      borderRightColor: theme['c-primary-alpha-900'],
-                    }}>
-                    <View style={styles.equalizerSliderRow}>
-                      <Text size={13} style={styles.equalizerLabel}>{frequency >= 1000 ? `${frequency / 1000}k` : `${frequency}`}</Text>
-                      <Slider
-                        minimumValue={minGain}
-                        maximumValue={maxGain}
-                        step={0.1}
-                        value={previewGains[frequency]}
-                        onValueChange={value => { handleValueChange(frequency, Number(value)) }}
-                        onSlidingComplete={value => { handleSlidingComplete(frequency, Number(value)) }}
-                      />
-                      <Text size={12} color={theme['c-font-label']} style={styles.equalizerValue}>{formatGain(previewGains[frequency])}</Text>
-                    </View>
-                  </View>
-                ))}
-              </View>
-            ))}
-          </View>
-
-          <View style={styles.presetList}>
-            {equalizerPresets.filter(preset => preset.id != 'none').map(preset => {
-              const isActive = preset.id == presetId
-              return (
-                <TouchableOpacity
-                  key={preset.id}
-                  activeOpacity={0.7}
-                  style={{
-                    ...styles.presetButton,
-                    backgroundColor: isActive ? theme['c-button-background-selected'] : theme['c-button-background'],
-                  }}
-                  onPress={() => { handlePresetPress(preset.id) }}>
-                  <Text size={13} color={isActive ? theme['c-button-font-selected'] : theme['c-button-font']}>
-                    {t(preset.nameKey)}
-                  </Text>
-                </TouchableOpacity>
-              )
-            })}
-          </View>
+          <EqualizerSection
+            presetId={presetId}
+            previewGains={previewGains}
+            onReset={handleReset}
+            onPresetPress={handlePresetPress}
+            onValueChange={handleValueChange}
+            onSlidingComplete={handleSlidingComplete}
+            layoutMode={layoutMode}
+          />
         </View>
       </View>
     </View>
@@ -460,6 +636,12 @@ const styles = createStyle({
   equalizerValue: {
     width: 46,
     textAlign: 'right',
+  },
+  stackedEqualizerList: {
+    marginBottom: 10,
+  },
+  stackedEqualizerItem: {
+    marginBottom: 6,
   },
   presetList: {
     flexDirection: 'row',
