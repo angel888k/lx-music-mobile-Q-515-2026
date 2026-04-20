@@ -1318,6 +1318,7 @@ struct LXStreamingPannerDelayLine {
   std::vector<float> buffer;
   NSUInteger writeIndex = 0;
 
+  LXStreamingPannerDelayLine() : buffer(1, 0), writeIndex(0) {}
   explicit LXStreamingPannerDelayLine(NSUInteger size) : buffer(MAX(size, (NSUInteger)1), 0), writeIndex(0) {}
 
   float pushAndRead(float input, NSUInteger delaySamples) {
