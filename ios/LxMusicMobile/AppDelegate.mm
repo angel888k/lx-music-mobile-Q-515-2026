@@ -11,7 +11,10 @@
 #import <MediaPlayer/MediaPlayer.h>
 #import <JavaScriptCore/JavaScriptCore.h>
 #import <math.h>
+#include <alloca.h>
+#include <atomic>
 #include <algorithm>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -1082,6 +1085,588 @@ static LXImpulseResponseData LXLoadImpulseResponse(NSURL *url, double targetSamp
   return result;
 }
 
+class LXStreamingPlanarPCMBuffer {
+public:
+  void reset(size_t channelCount, size_t frameCapacity) {
+    channelCount_ = std::max<size_t>(1, channelCount);
+    frameCapacity_ = std::max<size_t>(1, frameCapacity);
+    channels_.assign(channelCount_, std::vector<float>(frameCapacity_, 0));
+    readCursor_.store(0, std::memory_order_release);
+    writeCursor_.store(0, std::memory_order_release);
+  }
+
+  size_t availableToRead() const {
+    uint64_t writeCursor = writeCursor_.load(std::memory_order_acquire);
+    uint64_t readCursor = readCursor_.load(std::memory_order_acquire);
+    return (size_t)std::min<uint64_t>(writeCursor - readCursor, frameCapacity_);
+  }
+
+  size_t availableToWrite() const {
+    return frameCapacity_ - availableToRead();
+  }
+
+  void clear() {
+    uint64_t writeCursor = writeCursor_.load(std::memory_order_acquire);
+    readCursor_.store(writeCursor, std::memory_order_release);
+  }
+
+  size_t write(float *const *inputChannels, size_t frameCount, size_t activeChannels) {
+    if (channels_.empty() || frameCount == 0) return 0;
+
+    uint64_t writeCursor = writeCursor_.load(std::memory_order_relaxed);
+    uint64_t readCursor = readCursor_.load(std::memory_order_acquire);
+    size_t writableFrames = (size_t)std::min<uint64_t>(frameCount, frameCapacity_ - std::min<uint64_t>(writeCursor - readCursor, frameCapacity_));
+    if (!writableFrames) return 0;
+
+    size_t activeCount = std::min(activeChannels, channelCount_);
+    size_t startIndex = (size_t)(writeCursor % frameCapacity_);
+    size_t firstPart = std::min(writableFrames, frameCapacity_ - startIndex);
+    size_t secondPart = writableFrames - firstPart;
+
+    for (size_t channel = 0; channel < channelCount_; channel++) {
+      std::vector<float> &buffer = channels_[channel];
+      if (channel < activeCount && inputChannels != NULL && inputChannels[channel] != NULL) {
+        memcpy(buffer.data() + startIndex, inputChannels[channel], firstPart * sizeof(float));
+        if (secondPart) memcpy(buffer.data(), inputChannels[channel] + firstPart, secondPart * sizeof(float));
+      } else {
+        memset(buffer.data() + startIndex, 0, firstPart * sizeof(float));
+        if (secondPart) memset(buffer.data(), 0, secondPart * sizeof(float));
+      }
+    }
+
+    writeCursor_.store(writeCursor + writableFrames, std::memory_order_release);
+    return writableFrames;
+  }
+
+  size_t read(float *const *outputChannels, size_t frameCount, size_t activeChannels) {
+    if (channels_.empty() || frameCount == 0 || outputChannels == NULL) return 0;
+
+    uint64_t readCursor = readCursor_.load(std::memory_order_relaxed);
+    uint64_t writeCursor = writeCursor_.load(std::memory_order_acquire);
+    size_t readableFrames = (size_t)std::min<uint64_t>(frameCount, writeCursor - readCursor);
+    if (!readableFrames) return 0;
+
+    size_t activeCount = std::min(activeChannels, channelCount_);
+    size_t startIndex = (size_t)(readCursor % frameCapacity_);
+    size_t firstPart = std::min(readableFrames, frameCapacity_ - startIndex);
+    size_t secondPart = readableFrames - firstPart;
+
+    for (size_t channel = 0; channel < activeCount; channel++) {
+      const std::vector<float> &buffer = channels_[channel];
+      memcpy(outputChannels[channel], buffer.data() + startIndex, firstPart * sizeof(float));
+      if (secondPart) memcpy(outputChannels[channel] + firstPart, buffer.data(), secondPart * sizeof(float));
+    }
+
+    readCursor_.store(readCursor + readableFrames, std::memory_order_release);
+    return readableFrames;
+  }
+
+private:
+  size_t channelCount_ = 0;
+  size_t frameCapacity_ = 0;
+  std::vector<std::vector<float>> channels_;
+  std::atomic<uint64_t> readCursor_ { 0 };
+  std::atomic<uint64_t> writeCursor_ { 0 };
+};
+
+struct LXRealtimePannerDelayLine {
+  std::vector<float> buffer;
+  NSUInteger writeIndex = 0;
+
+  LXRealtimePannerDelayLine() : buffer(1, 0), writeIndex(0) {}
+  explicit LXRealtimePannerDelayLine(NSUInteger size) : buffer(MAX(size, (NSUInteger)1), 0), writeIndex(0) {}
+
+  float pushAndRead(float input, NSUInteger delaySamples) {
+    NSUInteger bufferCount = (NSUInteger)buffer.size();
+    NSUInteger clampedDelay = MIN(delaySamples, bufferCount > 0 ? bufferCount - 1 : 0);
+    buffer[writeIndex] = input;
+    NSUInteger readIndex = (writeIndex + bufferCount - clampedDelay) % bufferCount;
+    float output = buffer[readIndex];
+    writeIndex += 1;
+    if (writeIndex >= bufferCount) writeIndex = 0;
+    return output;
+  }
+};
+
+struct LXRealtimePhaseVocoderChannelState {
+  std::vector<float> inputBuffer;
+  std::vector<float> outputBuffer;
+  std::vector<float> hopInput;
+  std::vector<float> outputQueue;
+};
+
+class LXRealtimeConvolutionProcessor {
+public:
+  static std::vector<std::pair<NSUInteger, NSUInteger>> routeMappingWithIRChannelCount(NSUInteger irChannelCount, NSUInteger inputChannels, NSUInteger outputChannels) {
+    if (inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 4) {
+      return {
+        { 0 * inputChannels + 0, 0 },
+        { 0 * inputChannels + 1, 2 },
+        { 1 * inputChannels + 0, 1 },
+        { 1 * inputChannels + 1, 3 },
+      };
+    }
+    if (outputChannels >= 2 && irChannelCount >= 2 && inputChannels == 1) {
+      return { { 0, 0 }, { 1, 1 } };
+    }
+    if (inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 2) {
+      return {
+        { 0 * inputChannels + 0, 0 },
+        { 1 * inputChannels + 1, 1 },
+      };
+    }
+    if (inputChannels >= 2 && outputChannels >= 2) {
+      return {
+        { 0 * inputChannels + 0, 0 },
+        { 1 * inputChannels + 1, 0 },
+      };
+    }
+    return { { 0, 0 } };
+  }
+
+  static void performFFTWithSetup(FFTSetup setup, vDSP_Length log2n, std::vector<float> &real, std::vector<float> &imag, FFTDirection direction) {
+    DSPSplitComplex split = {
+      .realp = real.data(),
+      .imagp = imag.data(),
+    };
+    vDSP_fft_zip(setup, &split, 1, log2n, direction);
+  }
+
+  LXRealtimeConvolutionProcessor(const LXImpulseResponseData &impulse, NSUInteger inputChannels, NSUInteger outputChannels, float dryGain, float wetGain) {
+    _blockSize = 512;
+    _fftSize = _blockSize * 2;
+    _inputChannels = std::max((NSUInteger)1, inputChannels);
+    _outputChannels = std::max((NSUInteger)1, outputChannels);
+    _dryGain.store(dryGain, std::memory_order_release);
+    _wetGain.store(wetGain, std::memory_order_release);
+
+    size_t impulseLength = 0;
+    for (const auto &channel : impulse.channels) impulseLength = std::max(impulseLength, channel.size());
+    _partitionCount = std::max((NSUInteger)1, (NSUInteger)ceil((double)impulseLength / (double)_blockSize));
+
+    NSUInteger log2Value = (NSUInteger)llround(log2((double)_fftSize));
+    if (((NSUInteger)1 << log2Value) != _fftSize) return;
+    _log2n = (vDSP_Length)log2Value;
+    _fftSetup = vDSP_create_fftsetup(_log2n, FFTRadix(kFFTRadix2));
+    if (_fftSetup == NULL) return;
+
+    NSUInteger routeCount = _inputChannels * _outputChannels;
+    _filterReal.assign(routeCount, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+    _filterImag.assign(routeCount, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+    _historyReal.assign(_inputChannels, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+    _historyImag.assign(_inputChannels, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
+    _overlaps.assign(_outputChannels, std::vector<float>(_blockSize, 0));
+    _inputBuffer.assign(_inputChannels, std::vector<float>(_blockSize, 0));
+    _outputQueue.assign(_outputChannels, std::vector<float>());
+
+    auto routeMapping = routeMappingWithIRChannelCount((NSUInteger)impulse.channels.size(), _inputChannels, _outputChannels);
+    for (const auto &route : routeMapping) {
+      const auto &impulseChannel = impulse.channels[std::min((size_t)route.second, impulse.channels.size() - 1)];
+      for (NSUInteger partition = 0; partition < _partitionCount; partition++) {
+        NSUInteger start = partition * _blockSize;
+        NSUInteger end = MIN(start + _blockSize, (NSUInteger)impulseChannel.size());
+        std::vector<float> real(_fftSize, 0);
+        if (start < end) std::copy(impulseChannel.begin() + start, impulseChannel.begin() + end, real.begin());
+        std::vector<float> imag(_fftSize, 0);
+        performFFTWithSetup(_fftSetup, _log2n, real, imag, FFTDirection(FFT_FORWARD));
+        _filterReal[route.first][partition] = std::move(real);
+        _filterImag[route.first][partition] = std::move(imag);
+      }
+    }
+    _isReady = true;
+  }
+
+  ~LXRealtimeConvolutionProcessor() {
+    if (_fftSetup != NULL) vDSP_destroy_fftsetup(_fftSetup);
+  }
+
+  bool isReady() const {
+    return _isReady;
+  }
+
+  void updateDryGain(float dryGain, float wetGain) {
+    _dryGain.store(dryGain, std::memory_order_release);
+    _wetGain.store(wetGain, std::memory_order_release);
+  }
+
+  void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels) {
+    if (!_isReady) return;
+    NSUInteger usedChannels = MIN(activeChannels, _inputChannels);
+    if (usedChannels == 0 || channels == NULL) return;
+
+    for (NSUInteger frame = 0; frame < frameCount; frame++) {
+      for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+        _inputBuffer[channel][_inputFill] = channels[channel][frame];
+      }
+      _inputFill += 1;
+      if (_inputFill >= _blockSize) {
+        processBufferedBlock();
+        _inputFill = 0;
+      }
+
+      if (!_outputQueue.empty() && !_outputQueue[0].empty() && _outputReadIndex < _outputQueue[0].size()) {
+        for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+          channels[channel][frame] = channel < _outputChannels ? _outputQueue[channel][_outputReadIndex] : 0;
+        }
+        _outputReadIndex += 1;
+        if (_outputReadIndex >= _outputQueue[0].size()) {
+          _outputQueue.assign(_outputChannels, std::vector<float>());
+          _outputReadIndex = 0;
+        }
+      } else {
+        for (NSUInteger channel = 0; channel < usedChannels; channel++) channels[channel][frame] = 0;
+      }
+    }
+  }
+
+private:
+  void processBufferedBlock() {
+    std::vector<std::vector<float>> wetOutputs(_outputChannels, std::vector<float>(_blockSize, 0));
+
+    for (NSUInteger inputChannel = 0; inputChannel < _inputChannels; inputChannel++) {
+      std::vector<float> real(_fftSize, 0);
+      std::copy(_inputBuffer[inputChannel].begin(), _inputBuffer[inputChannel].end(), real.begin());
+      std::vector<float> imag(_fftSize, 0);
+      performFFTWithSetup(_fftSetup, _log2n, real, imag, FFTDirection(FFT_FORWARD));
+      _historyReal[inputChannel].insert(_historyReal[inputChannel].begin(), real);
+      _historyImag[inputChannel].insert(_historyImag[inputChannel].begin(), imag);
+      if (_historyReal[inputChannel].size() > _partitionCount) {
+        _historyReal[inputChannel].pop_back();
+        _historyImag[inputChannel].pop_back();
+      }
+    }
+
+    for (NSUInteger outputChannel = 0; outputChannel < _outputChannels; outputChannel++) {
+      std::vector<float> sumReal(_fftSize, 0);
+      std::vector<float> sumImag(_fftSize, 0);
+
+      for (NSUInteger inputChannel = 0; inputChannel < _inputChannels; inputChannel++) {
+        NSUInteger routeIndex = outputChannel * _inputChannels + inputChannel;
+        for (NSUInteger partition = 0; partition < _partitionCount; partition++) {
+          const auto &inputReal = _historyReal[inputChannel][partition];
+          const auto &inputImag = _historyImag[inputChannel][partition];
+          const auto &filterReal = _filterReal[routeIndex][partition];
+          const auto &filterImag = _filterImag[routeIndex][partition];
+          for (NSUInteger index = 0; index < _fftSize; index++) {
+            float real = filterReal[index] * inputReal[index] - filterImag[index] * inputImag[index];
+            float imag = filterReal[index] * inputImag[index] + filterImag[index] * inputReal[index];
+            sumReal[index] += real;
+            sumImag[index] += imag;
+          }
+        }
+      }
+
+      performFFTWithSetup(_fftSetup, _log2n, sumReal, sumImag, FFTDirection(FFT_INVERSE));
+      float scale = 1.0f / (float)_fftSize;
+      for (NSUInteger index = 0; index < _fftSize; index++) sumReal[index] *= scale;
+
+      for (NSUInteger index = 0; index < _blockSize; index++) {
+        wetOutputs[outputChannel][index] = sumReal[index] + _overlaps[outputChannel][index];
+      }
+      _overlaps[outputChannel].assign(sumReal.begin() + _blockSize, sumReal.end());
+    }
+
+    float dryGain = _dryGain.load(std::memory_order_acquire);
+    float wetGain = _wetGain.load(std::memory_order_acquire);
+    _outputQueue.assign(_outputChannels, std::vector<float>(_blockSize, 0));
+    _outputReadIndex = 0;
+    for (NSUInteger outputChannel = 0; outputChannel < _outputChannels; outputChannel++) {
+      for (NSUInteger index = 0; index < _blockSize; index++) {
+        float dry = outputChannel < _inputBuffer.size() ? _inputBuffer[outputChannel][index] * dryGain : 0;
+        float wet = wetOutputs[outputChannel][index] * wetGain;
+        _outputQueue[outputChannel][index] = fmaxf(fminf(dry + wet, 1.0f), -1.0f);
+      }
+    }
+  }
+
+  NSUInteger _blockSize = 0;
+  NSUInteger _fftSize = 0;
+  NSUInteger _partitionCount = 0;
+  NSUInteger _inputChannels = 0;
+  NSUInteger _outputChannels = 0;
+  vDSP_Length _log2n = 0;
+  FFTSetup _fftSetup = NULL;
+  std::vector<std::vector<std::vector<float>>> _filterReal;
+  std::vector<std::vector<std::vector<float>>> _filterImag;
+  std::vector<std::vector<std::vector<float>>> _historyReal;
+  std::vector<std::vector<std::vector<float>>> _historyImag;
+  std::vector<std::vector<float>> _overlaps;
+  std::vector<std::vector<float>> _inputBuffer;
+  std::vector<std::vector<float>> _outputQueue;
+  NSUInteger _inputFill = 0;
+  NSUInteger _outputReadIndex = 0;
+  std::atomic<float> _dryGain { 1.0f };
+  std::atomic<float> _wetGain { 0.0f };
+  bool _isReady = false;
+};
+
+class LXRealtimeSpatialPannerProcessor {
+public:
+  LXRealtimeSpatialPannerProcessor(double sampleRate, float soundR, float speed) {
+    _sampleRate = sampleRate;
+    _processedSamples = 0;
+    _maxDelaySamples = std::max((NSUInteger)llround(sampleRate * 0.00075), (NSUInteger)1);
+    _leftDelay = LXRealtimePannerDelayLine(_maxDelaySamples + 2);
+    _rightDelay = LXRealtimePannerDelayLine(_maxDelaySamples + 2);
+    updateSoundR(soundR, speed);
+  }
+
+  void updateSoundR(float soundR, float speed) {
+    _soundR.store(fmaxf(0.1f, fminf(soundR / 10.0f, 3.0f)), std::memory_order_release);
+    _speed.store(fmaxf(1.0f, fminf(speed, 50.0f)), std::memory_order_release);
+  }
+
+  void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels) {
+    if (channels == NULL || activeChannels < 2 || _sampleRate <= 0) return;
+
+    float soundR = _soundR.load(std::memory_order_acquire);
+    float speed = _speed.load(std::memory_order_acquire);
+    for (NSUInteger frame = 0; frame < frameCount; frame++) {
+      double phaseStep = (M_PI / 180.0) / (MAX((double)speed * 0.01, 0.1) * _sampleRate);
+      float angle = (float)(_processedSamples * phaseStep);
+      float x = sinf(angle) * soundR;
+      float y = cosf(angle) * soundR;
+      float z = cosf(angle) * soundR;
+      float distance = sqrtf(x * x + y * y + z * z);
+      float attenuation = 1.0f / (1.0f + 0.18f * distance);
+      float normalizedX = fmaxf(-1.0f, fminf(1.0f, x / fmaxf(soundR, 0.0001f)));
+      float leftGain = attenuation * sqrtf(0.5f * (1.0f - normalizedX));
+      float rightGain = attenuation * sqrtf(0.5f * (1.0f + normalizedX));
+      float backFactor = z > 0 ? fmaxf(0.72f, 1.0f - 0.12f * z) : 1.0f;
+      float sidePreserve = 0.28f * attenuation;
+      NSUInteger itdSamples = (NSUInteger)llroundf(fabsf(normalizedX) * (float)_maxDelaySamples);
+
+      float inputLeft = channels[0][frame];
+      float inputRight = channels[1][frame];
+      float mid = 0.5f * (inputLeft + inputRight);
+      float side = 0.5f * (inputLeft - inputRight);
+
+      float delayedLeft = _leftDelay.pushAndRead(mid * leftGain * backFactor, normalizedX > 0 ? itdSamples : 0);
+      float delayedRight = _rightDelay.pushAndRead(mid * rightGain * backFactor, normalizedX < 0 ? itdSamples : 0);
+
+      channels[0][frame] = fmaxf(fminf(delayedLeft + side * sidePreserve, 1.0f), -1.0f);
+      channels[1][frame] = fmaxf(fminf(delayedRight - side * sidePreserve, 1.0f), -1.0f);
+      _processedSamples += 1.0;
+    }
+  }
+
+private:
+  double _sampleRate = 0;
+  double _processedSamples = 0;
+  NSUInteger _maxDelaySamples = 0;
+  LXRealtimePannerDelayLine _leftDelay;
+  LXRealtimePannerDelayLine _rightDelay;
+  std::atomic<float> _soundR { 0.5f };
+  std::atomic<float> _speed { 25.0f };
+};
+
+class LXRealtimePhaseVocoderPitchShifter {
+public:
+  explicit LXRealtimePhaseVocoderPitchShifter(NSUInteger channelCount) {
+    _blockSize = 4096;
+    _hopSize = 128;
+    _overlapCount = (float)(_blockSize / _hopSize);
+    _channelCount = std::max((NSUInteger)1, channelCount);
+
+    NSUInteger log2Value = (NSUInteger)llround(log2((double)_blockSize));
+    if (((NSUInteger)1 << log2Value) != _blockSize) return;
+    _log2n = (vDSP_Length)log2Value;
+    _fftSetup = vDSP_create_fftsetup(_log2n, FFTRadix(kFFTRadix2));
+    if (_fftSetup == NULL) return;
+
+    _hannWindow.resize(_blockSize);
+    for (NSUInteger index = 0; index < _blockSize; index++) {
+      _hannWindow[index] = (float)(0.8 * (1.0 - cos(2.0 * M_PI * (double)index / (double)_blockSize)));
+    }
+
+    _channels.resize(_channelCount);
+    for (NSUInteger channel = 0; channel < _channelCount; channel++) {
+      _channels[channel].inputBuffer.assign(_blockSize, 0);
+      _channels[channel].outputBuffer.assign(_blockSize, 0);
+      _channels[channel].hopInput.assign(_hopSize, 0);
+      _channels[channel].outputQueue.assign(_hopSize, 0);
+    }
+    _isReady = true;
+  }
+
+  ~LXRealtimePhaseVocoderPitchShifter() {
+    if (_fftSetup != NULL) vDSP_destroy_fftsetup(_fftSetup);
+  }
+
+  bool isReady() const {
+    return _isReady;
+  }
+
+  void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels, float pitchFactor) {
+    if (!_isReady) return;
+    NSUInteger usedChannels = MIN(activeChannels, _channelCount);
+    if (!channels || usedChannels == 0) return;
+    if (fabsf(pitchFactor - 1.0f) <= 0.001f) return;
+
+    for (NSUInteger frame = 0; frame < frameCount; frame++) {
+      for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+        _channels[channel].hopInput[_hopFill] = channels[channel][frame];
+      }
+      _hopFill += 1;
+
+      if (_outputReadIndex < _hopSize) {
+        for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+          channels[channel][frame] = _channels[channel].outputQueue[_outputReadIndex];
+        }
+        _outputReadIndex += 1;
+      } else {
+        for (NSUInteger channel = 0; channel < usedChannels; channel++) channels[channel][frame] = 0;
+      }
+
+      if (_hopFill >= _hopSize) {
+        processHopWithPitchFactor(pitchFactor, usedChannels);
+        _hopFill = 0;
+        _outputReadIndex = 0;
+        _timeCursor += _hopSize;
+      }
+    }
+  }
+
+private:
+  void applyWindow(std::vector<float> &values) {
+    for (NSUInteger index = 0; index < MIN(values.size(), _hannWindow.size()); index++) {
+      values[index] *= _hannWindow[index];
+    }
+  }
+
+  void performFFT(std::vector<float> &real, std::vector<float> &imag, FFTDirection direction) {
+    DSPSplitComplex split = {
+      .realp = real.data(),
+      .imagp = imag.data(),
+    };
+    vDSP_fft_zip(_fftSetup, &split, 1, _log2n, direction);
+  }
+
+  std::vector<float> computeMagnitudes(const std::vector<float> &real, const std::vector<float> &imag, NSUInteger count) {
+    std::vector<float> magnitudes(count, 0);
+    for (NSUInteger index = 0; index < count; index++) {
+      magnitudes[index] = real[index] * real[index] + imag[index] * imag[index];
+    }
+    return magnitudes;
+  }
+
+  std::vector<NSUInteger> findPeaks(const std::vector<float> &magnitudes) {
+    std::vector<NSUInteger> peaks;
+    if (magnitudes.size() <= 4) return peaks;
+
+    NSUInteger index = 2;
+    NSUInteger end = (NSUInteger)magnitudes.size() - 2;
+    while (index < end) {
+      float magnitude = magnitudes[index];
+      if (magnitudes[index - 1] >= magnitude || magnitudes[index - 2] >= magnitude) {
+        index += 1;
+        continue;
+      }
+      if (magnitudes[index + 1] >= magnitude || magnitudes[index + 2] >= magnitude) {
+        index += 1;
+        continue;
+      }
+      peaks.push_back(index);
+      index += 2;
+    }
+    return peaks;
+  }
+
+  void completeSpectrum(std::vector<float> &real, std::vector<float> &imag) {
+    NSUInteger half = _blockSize / 2;
+    if (half <= 1) return;
+    for (NSUInteger index = 1; index < half; index++) {
+      real[_blockSize - index] = real[index];
+      imag[_blockSize - index] = -imag[index];
+    }
+  }
+
+  void shiftSpectrum(const std::vector<float> &real, const std::vector<float> &imag, std::vector<float> &shiftedReal, std::vector<float> &shiftedImag, float pitchFactor) {
+    NSUInteger halfCount = _blockSize / 2;
+    if (halfCount <= 2) return;
+
+    std::vector<float> magnitudes = computeMagnitudes(real, imag, halfCount + 1);
+    std::vector<NSUInteger> peaks = findPeaks(magnitudes);
+
+    for (NSUInteger peakIndex = 0; peakIndex < peaks.size(); peakIndex++) {
+      NSInteger currentPeak = (NSInteger)peaks[peakIndex];
+      NSInteger shiftedPeak = (NSInteger)llround((double)currentPeak * pitchFactor);
+      if (shiftedPeak > (NSInteger)halfCount) break;
+
+      NSInteger startIndex = peakIndex > 0
+        ? currentPeak - (NSInteger)floor((double)(currentPeak - (NSInteger)peaks[peakIndex - 1]) / 2.0)
+        : 0;
+      NSInteger endIndex = peakIndex < peaks.size() - 1
+        ? currentPeak + (NSInteger)ceil((double)((NSInteger)peaks[peakIndex + 1] - currentPeak) / 2.0)
+        : (NSInteger)halfCount + 1;
+
+      for (NSInteger offset = startIndex - currentPeak; offset < endIndex - currentPeak; offset++) {
+        NSInteger binIndex = currentPeak + offset;
+        NSInteger shiftedIndex = shiftedPeak + offset;
+        if (shiftedIndex < 0 || shiftedIndex > (NSInteger)halfCount || binIndex < 0 || binIndex > (NSInteger)halfCount) continue;
+
+        float omegaDelta = 2.0f * (float)M_PI * (float)(shiftedIndex - binIndex) / (float)_blockSize;
+        float phase = omegaDelta * (float)_timeCursor;
+        float phaseShiftReal = cosf(phase);
+        float phaseShiftImag = sinf(phase);
+        float valueReal = real[(NSUInteger)binIndex];
+        float valueImag = imag[(NSUInteger)binIndex];
+
+        float shiftedValueReal = valueReal * phaseShiftReal - valueImag * phaseShiftImag;
+        float shiftedValueImag = valueReal * phaseShiftImag + valueImag * phaseShiftReal;
+        shiftedReal[(NSUInteger)shiftedIndex] += shiftedValueReal;
+        shiftedImag[(NSUInteger)shiftedIndex] += shiftedValueImag;
+      }
+    }
+  }
+
+  void processHopWithPitchFactor(float pitchFactor, NSUInteger usedChannels) {
+    for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+      LXRealtimePhaseVocoderChannelState &state = _channels[channel];
+      std::copy(state.inputBuffer.begin() + _hopSize, state.inputBuffer.end(), state.inputBuffer.begin());
+      std::copy(state.hopInput.begin(), state.hopInput.end(), state.inputBuffer.begin() + (_blockSize - _hopSize));
+
+      std::vector<float> windowedInput = state.inputBuffer;
+      applyWindow(windowedInput);
+
+      std::vector<float> spectrumReal = windowedInput;
+      std::vector<float> spectrumImag(_blockSize, 0);
+      performFFT(spectrumReal, spectrumImag, FFTDirection(FFT_FORWARD));
+
+      std::vector<float> shiftedReal(_blockSize, 0);
+      std::vector<float> shiftedImag(_blockSize, 0);
+      shiftSpectrum(spectrumReal, spectrumImag, shiftedReal, shiftedImag, pitchFactor);
+      completeSpectrum(shiftedReal, shiftedImag);
+
+      performFFT(shiftedReal, shiftedImag, FFTDirection(FFT_INVERSE));
+      std::vector<float> timeDomain(_blockSize, 0);
+      for (NSUInteger index = 0; index < _blockSize; index++) timeDomain[index] = shiftedReal[index] / (float)_blockSize;
+      applyWindow(timeDomain);
+
+      for (NSUInteger index = 0; index < _blockSize; index++) {
+        state.outputBuffer[index] += timeDomain[index] / _overlapCount;
+      }
+
+      std::copy(state.outputBuffer.begin(), state.outputBuffer.begin() + _hopSize, state.outputQueue.begin());
+      std::copy(state.outputBuffer.begin() + _hopSize, state.outputBuffer.end(), state.outputBuffer.begin());
+      std::fill(state.outputBuffer.begin() + (_blockSize - _hopSize), state.outputBuffer.end(), 0.0f);
+    }
+  }
+
+  NSUInteger _blockSize = 0;
+  NSUInteger _hopSize = 0;
+  float _overlapCount = 0;
+  NSUInteger _channelCount = 0;
+  FFTSetup _fftSetup = NULL;
+  vDSP_Length _log2n = 0;
+  std::vector<float> _hannWindow;
+  std::vector<LXRealtimePhaseVocoderChannelState> _channels;
+  NSUInteger _hopFill = 0;
+  NSUInteger _outputReadIndex = 0;
+  NSUInteger _timeCursor = 0;
+  bool _isReady = false;
+};
+
 @interface LXStreamingConvolutionEngine : NSObject
 - (instancetype)initWithAssetURL:(NSURL *)assetURL
                        sampleRate:(double)sampleRate
@@ -1715,16 +2300,13 @@ RCT_REMAP_METHOD(updateEqualizerConfig, updateEqualizerConfig:(NSDictionary *)co
 @property (nonatomic, strong) dispatch_queue_t decoderQueue;
 @property (nonatomic, strong) dispatch_queue_t renderQueue;
 @property (nonatomic, strong) AVAudioEngine *engine;
-@property (nonatomic, strong) AVAudioPlayerNode *playerNode;
+@property (nonatomic, strong) AVAudioSourceNode *sourceNode;
 @property (nonatomic, strong) AVAudioUnitTimePitch *timePitchNode;
 @property (nonatomic, strong) AVAudioUnitEQ *equalizerNode;
 @property (nonatomic, strong) AVAudioUnitReverb *reverbNode;
 @property (nonatomic, strong) AVAudioMixerNode *dryMixerNode;
 @property (nonatomic, strong) AVAudioMixerNode *wetMixerNode;
 @property (nonatomic, strong) AVAudioMixerNode *soundEffectMixerNode;
-@property (nonatomic, strong) LXStreamingConvolutionEngine *convolutionEngine;
-@property (nonatomic, strong) LXStreamingPhaseVocoderPitchShifter *pitchShifterEngine;
-@property (nonatomic, strong) LXStreamingSpatialPannerEngine *spatialPannerEngine;
 @property (nonatomic, strong) AVAudioFormat *outputFormat;
 @property (nonatomic, strong) dispatch_source_t pannerTimer;
 @property (nonatomic, copy) NSString *convolutionAssetKey;
@@ -1773,7 +2355,20 @@ static void LXStreamingFlacErrorCallback(const FLAC__StreamDecoder *decoder, FLA
 static NSString *LXStreamingFlacDecoderErrorStatusName(FLAC__StreamDecoderErrorStatus status);
 #endif
 
-@implementation StreamingFlacPlayerModule
+@implementation StreamingFlacPlayerModule {
+  std::unique_ptr<LXStreamingPlanarPCMBuffer> _pcmBuffer;
+  std::atomic<int64_t> _renderedFrames;
+  std::atomic<bool> _sourceRenderingEnabled;
+  std::atomic<bool> _streamFinished;
+  std::atomic<bool> _stopRequestedFlag;
+  std::atomic<bool> _bufferingNotificationScheduled;
+  std::atomic<bool> _endedNotificationScheduled;
+  std::atomic<int64_t> _renderPlaybackGeneration;
+  std::atomic<float> _pitchPlaybackRate;
+  std::shared_ptr<LXRealtimeConvolutionProcessor> _realtimeConvolutionProcessor;
+  std::shared_ptr<LXRealtimePhaseVocoderPitchShifter> _realtimePitchProcessor;
+  std::shared_ptr<LXRealtimeSpatialPannerProcessor> _realtimePannerProcessor;
+}
 
 RCT_EXPORT_MODULE();
 
@@ -1784,6 +2379,14 @@ RCT_EXPORT_MODULE();
 - (instancetype)init {
   self = [super init];
   if (self != nil) {
+    _renderedFrames.store(0, std::memory_order_release);
+    _sourceRenderingEnabled.store(false, std::memory_order_release);
+    _streamFinished.store(false, std::memory_order_release);
+    _stopRequestedFlag.store(false, std::memory_order_release);
+    _bufferingNotificationScheduled.store(false, std::memory_order_release);
+    _endedNotificationScheduled.store(false, std::memory_order_release);
+    _renderPlaybackGeneration.store(0, std::memory_order_release);
+    _pitchPlaybackRate.store(1.0f, std::memory_order_release);
     _streamCondition = [[NSCondition alloc] init];
     _decoderQueue = dispatch_queue_create("cn.toside.music.mobile.streamingflac.decoder", DISPATCH_QUEUE_SERIAL);
     _renderQueue = dispatch_queue_create("cn.toside.music.mobile.streamingflac.render", DISPATCH_QUEUE_SERIAL);
@@ -1886,12 +2489,74 @@ RCT_EXPORT_MODULE();
   });
 }
 
+- (int64_t)currentQueuedFrameCountLocked {
+  int64_t queuedFrames = _pcmBuffer != nullptr ? (int64_t)_pcmBuffer->availableToRead() : 0;
+  self.queuedFrames = queuedFrames;
+  return queuedFrames;
+}
+
+- (void)updatePlaybackGenerationLocked {
+  self.playbackGeneration += 1;
+  _renderPlaybackGeneration.store(self.playbackGeneration, std::memory_order_release);
+}
+
+- (void)resetRealtimeRenderStateLocked {
+  if (_pcmBuffer != nullptr) _pcmBuffer->clear();
+  _renderedFrames.store(0, std::memory_order_release);
+  _sourceRenderingEnabled.store(false, std::memory_order_release);
+  _bufferingNotificationScheduled.store(false, std::memory_order_release);
+  _endedNotificationScheduled.store(false, std::memory_order_release);
+  self.queuedFrames = 0;
+}
+
+- (void)rebuildRealtimeProcessorsLocked {
+  std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimePannerProcessor, std::shared_ptr<LXRealtimeSpatialPannerProcessor>(), std::memory_order_release);
+  self.convolutionAssetKey = nil;
+  [self applySoundEffectConfigLocked];
+}
+
+- (void)scheduleBufferingStateForGeneration:(int64_t)generation {
+  if (_bufferingNotificationScheduled.exchange(true, std::memory_order_acq_rel)) return;
+  _sourceRenderingEnabled.store(false, std::memory_order_release);
+  dispatch_async(self.renderQueue, ^{
+    if (generation != self.playbackGeneration) return;
+    if (_sourceRenderingEnabled.load(std::memory_order_acquire)) return;
+    if (self.stopRequested || self.manualPause || !self.playbackStarted) return;
+    self.lastKnownPosition = [self currentPlaybackPositionLocked];
+    self.playbackStarted = NO;
+    self.currentState = @"buffering";
+    [self emitState:@"buffering" position:@(self.lastKnownPosition) duration:@(self.duration)];
+  });
+}
+
+- (void)scheduleEndedStateForGeneration:(int64_t)generation {
+  if (_endedNotificationScheduled.exchange(true, std::memory_order_acq_rel)) return;
+  _sourceRenderingEnabled.store(false, std::memory_order_release);
+  dispatch_async(self.renderQueue, ^{
+    if (generation != self.playbackGeneration) return;
+    if (_sourceRenderingEnabled.load(std::memory_order_acquire)) return;
+    if (self.stopRequested || !self.downloadCompleted || [self currentQueuedFrameCountLocked] > 0) return;
+    self.lastKnownPosition = [self currentPlaybackPositionLocked];
+    self.playbackStarted = NO;
+    self.currentState = @"stopped";
+    [self emitEventWithType:@"ended" body:@{
+      @"state": @"stopped",
+      @"position": @(self.lastKnownPosition),
+      @"duration": @(self.duration),
+    }];
+  });
+}
+
 - (void)resetStreamingState {
   self.streamData = [NSMutableData data];
   self.readOffset = 0;
   self.streamError = nil;
   self.downloadCompleted = NO;
   self.stopRequested = NO;
+  _streamFinished.store(false, std::memory_order_release);
+  _stopRequestedFlag.store(false, std::memory_order_release);
   self.playbackStarted = NO;
   self.manualPause = NO;
   self.interruptedBySystem = NO;
@@ -1909,20 +2574,23 @@ RCT_EXPORT_MODULE();
   self.decodedFramesCursor = 0;
   self.seekRequested = NO;
   self.seekInProgress = NO;
-  self.playbackGeneration += 1;
+  [self updatePlaybackGenerationLocked];
   self.playbackAnchorFrame = 0;
+  _pitchPlaybackRate.store(1.0f, std::memory_order_release);
+  [self resetRealtimeRenderStateLocked];
   self.outputFormat = nil;
+  self.sourceNode = nil;
   self.equalizerNode = nil;
   self.reverbNode = nil;
   self.dryMixerNode = nil;
   self.wetMixerNode = nil;
   self.soundEffectMixerNode = nil;
-  self.convolutionEngine = nil;
-  self.pitchShifterEngine = nil;
-  self.spatialPannerEngine = nil;
   self.convolutionAssetKey = nil;
   self.pannerTimer = nil;
   self.pannerPhase = 0.0f;
+  std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimePannerProcessor, std::shared_ptr<LXRealtimeSpatialPannerProcessor>(), std::memory_order_release);
 }
 
 - (void)handleSoundEffectConfigChanged:(NSNotification *)notification {
@@ -1936,7 +2604,7 @@ RCT_EXPORT_MODULE();
     dispatch_source_cancel(self.pannerTimer);
     self.pannerTimer = nil;
   }
-  self.spatialPannerEngine = nil;
+  std::atomic_store_explicit(&_realtimePannerProcessor, std::shared_ptr<LXRealtimeSpatialPannerProcessor>(), std::memory_order_release);
   self.pannerPhase = 0.0f;
   if (self.soundEffectMixerNode != nil) self.soundEffectMixerNode.pan = 0.0f;
 }
@@ -1944,55 +2612,67 @@ RCT_EXPORT_MODULE();
 - (void)restartPannerLockedWithSoundR:(float)soundR speed:(float)speed {
   [self stopPannerLocked];
   if (self.sampleRate <= 0 || self.channels < 2) return;
-  self.spatialPannerEngine = [[LXStreamingSpatialPannerEngine alloc] initWithSampleRate:self.sampleRate soundR:soundR speed:speed];
+  std::shared_ptr<LXRealtimeSpatialPannerProcessor> processor = std::make_shared<LXRealtimeSpatialPannerProcessor>(self.sampleRate, soundR, speed);
+  std::atomic_store_explicit(&_realtimePannerProcessor, processor, std::memory_order_release);
   self.soundEffectMixerNode.pan = 0.0f;
 }
 
 - (BOOL)refreshConvolutionEngineLockedWithAssetUri:(NSString *)assetUri fileName:(NSString *)fileName mainGain:(float)mainGain sendGain:(float)sendGain {
   if (self.sampleRate <= 0 || self.channels == 0 || fileName.length == 0) {
-    self.convolutionEngine = nil;
+    std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
     self.convolutionAssetKey = nil;
     return NO;
   }
 
   NSURL *assetURL = LXSoundEffectResolveAssetURL(assetUri, fileName);
   if (assetURL == nil) {
-    self.convolutionEngine = nil;
+    std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
     self.convolutionAssetKey = nil;
     return NO;
   }
 
   NSString *assetKey = assetURL.absoluteString ?: fileName;
-  if (self.convolutionEngine != nil &&
-      [self.convolutionAssetKey isEqualToString:assetKey]) {
-    [self.convolutionEngine updateDryGain:mainGain / 10.0f wetGain:sendGain / 10.0f];
+  std::shared_ptr<LXRealtimeConvolutionProcessor> currentProcessor = std::atomic_load_explicit(&_realtimeConvolutionProcessor, std::memory_order_acquire);
+  if (currentProcessor != nullptr && [self.convolutionAssetKey isEqualToString:assetKey]) {
+    currentProcessor->updateDryGain(mainGain / 10.0f, sendGain / 10.0f);
     return YES;
   }
 
-  LXStreamingConvolutionEngine *engine = [[LXStreamingConvolutionEngine alloc] initWithAssetURL:assetURL
-                                                                                      sampleRate:self.sampleRate
-                                                                                   inputChannels:self.channels
-                                                                                  outputChannels:MIN(self.channels, 2)
-                                                                                         dryGain:mainGain / 10.0f
-                                                                                         wetGain:sendGain / 10.0f];
-  if (engine == nil) {
-    self.convolutionEngine = nil;
+  LXImpulseResponseData impulse = LXLoadImpulseResponse(assetURL, self.sampleRate);
+  if (impulse.channels.empty()) {
+    std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
     self.convolutionAssetKey = nil;
     return NO;
   }
 
-  self.convolutionEngine = engine;
+  std::shared_ptr<LXRealtimeConvolutionProcessor> processor = std::make_shared<LXRealtimeConvolutionProcessor>(
+    impulse,
+    self.channels,
+    MIN(self.channels, (NSUInteger)2),
+    mainGain / 10.0f,
+    sendGain / 10.0f
+  );
+  if (!processor->isReady()) {
+    std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
+    self.convolutionAssetKey = nil;
+    return NO;
+  }
+
+  std::atomic_store_explicit(&_realtimeConvolutionProcessor, processor, std::memory_order_release);
   self.convolutionAssetKey = assetKey;
   return YES;
 }
 
 - (void)refreshPitchShifterEngineLockedWithPitchFactor:(float)pitchFactor {
   if (self.sampleRate <= 0 || self.channels == 0 || fabsf(pitchFactor - 1.0f) <= 0.001f) {
-    self.pitchShifterEngine = nil;
+    std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
     return;
   }
-  if (self.pitchShifterEngine != nil) return;
-  self.pitchShifterEngine = [[LXStreamingPhaseVocoderPitchShifter alloc] initWithChannelCount:self.channels];
+  std::shared_ptr<LXRealtimePhaseVocoderPitchShifter> currentProcessor = std::atomic_load_explicit(&_realtimePitchProcessor, std::memory_order_acquire);
+  if (currentProcessor != nullptr) return;
+  std::shared_ptr<LXRealtimePhaseVocoderPitchShifter> processor = std::make_shared<LXRealtimePhaseVocoderPitchShifter>(self.channels);
+  if (!processor->isReady()) return;
+  std::atomic_store_explicit(&_realtimePitchProcessor, processor, std::memory_order_release);
 }
 
 - (void)applySoundEffectConfigLocked {
@@ -2016,16 +2696,18 @@ RCT_EXPORT_MODULE();
   float pannerSoundR = LXSoundEffectClampFloatValue(pannerConfig[@"soundR"], 5.0f, 1.0f, 30.0f);
   float pannerSpeed = LXSoundEffectClampFloatValue(pannerConfig[@"speed"], 25.0f, 1.0f, 50.0f);
   float pitchPlaybackRate = LXSoundEffectClampFloatValue(pitchShifterConfig[@"playbackRate"], 1.0f, 0.5f, 1.5f);
+  _pitchPlaybackRate.store(pitchPlaybackRate, std::memory_order_release);
   BOOL hasConvolution = convolutionFileName.length > 0;
   BOOL usesTrueConvolution = hasConvolution && [self refreshConvolutionEngineLockedWithAssetUri:convolutionAssetUri fileName:convolutionFileName mainGain:convolutionMainGain sendGain:convolutionSendGain];
   if (!hasConvolution) {
-    self.convolutionEngine = nil;
+    std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
     self.convolutionAssetKey = nil;
   }
   [self refreshPitchShifterEngineLockedWithPitchFactor:pitchPlaybackRate];
   if (pannerEnabled) {
-    if (self.spatialPannerEngine == nil) [self restartPannerLockedWithSoundR:pannerSoundR speed:pannerSpeed];
-    else [self.spatialPannerEngine updateSoundR:pannerSoundR speed:pannerSpeed];
+    std::shared_ptr<LXRealtimeSpatialPannerProcessor> pannerProcessor = std::atomic_load_explicit(&_realtimePannerProcessor, std::memory_order_acquire);
+    if (pannerProcessor == nullptr) [self restartPannerLockedWithSoundR:pannerSoundR speed:pannerSpeed];
+    else pannerProcessor->updateSoundR(pannerSoundR, pannerSpeed);
   } else {
     [self stopPannerLocked];
   }
@@ -2056,6 +2738,7 @@ RCT_EXPORT_MODULE();
   }
   if (self.dryMixerNode != nil) self.dryMixerNode.outputVolume = usesTrueConvolution ? 1.0f : (hasConvolution ? (convolutionMainGain / 10.0f) : 1.0f);
   if (self.wetMixerNode != nil) self.wetMixerNode.outputVolume = usesTrueConvolution ? 0.0f : (hasConvolution ? (convolutionSendGain / 10.0f) : 0.0f);
+  if (self.soundEffectMixerNode != nil) self.soundEffectMixerNode.outputVolume = self.currentVolume;
 
 }
 
@@ -2068,11 +2751,11 @@ RCT_EXPORT_MODULE();
     case AVAudioSessionInterruptionTypeBegan: {
       __block BOOL shouldEmitPause = NO;
       dispatch_sync(self.renderQueue, ^{
-        BOOL shouldHandle = self.playerNode != nil && (self.playerNode.isPlaying || self.playbackStarted || [self.currentState isEqualToString:@"buffering"]);
+        BOOL shouldHandle = self.sourceNode != nil && (self.playbackStarted || [self.currentState isEqualToString:@"buffering"]);
         if (!shouldHandle || self.manualPause) return;
         self.lastKnownPosition = [self currentPlaybackPositionLocked];
         if (self.engine != nil && self.engine.isRunning) [self.engine pause];
-        [self.playerNode pause];
+        _sourceRenderingEnabled.store(false, std::memory_order_release);
         self.playbackStarted = NO;
         shouldEmitPause = YES;
       });
@@ -2125,12 +2808,10 @@ RCT_EXPORT_MODULE();
 
 - (void)cleanupAudioGraphLocked {
   [self stopPannerLocked];
-  if (self.playerNode != nil) {
-    [self.playerNode stop];
-  }
+  [self resetRealtimeRenderStateLocked];
   if (self.engine != nil) {
     [self.engine stop];
-    if (self.playerNode != nil) [self.engine detachNode:self.playerNode];
+    if (self.sourceNode != nil) [self.engine detachNode:self.sourceNode];
     if (self.timePitchNode != nil) [self.engine detachNode:self.timePitchNode];
     if (self.equalizerNode != nil) [self.engine detachNode:self.equalizerNode];
     if (self.reverbNode != nil) [self.engine detachNode:self.reverbNode];
@@ -2138,7 +2819,7 @@ RCT_EXPORT_MODULE();
     if (self.wetMixerNode != nil) [self.engine detachNode:self.wetMixerNode];
     if (self.soundEffectMixerNode != nil) [self.engine detachNode:self.soundEffectMixerNode];
   }
-  self.playerNode = nil;
+  self.sourceNode = nil;
   self.timePitchNode = nil;
   self.equalizerNode = nil;
   self.reverbNode = nil;
@@ -2147,21 +2828,14 @@ RCT_EXPORT_MODULE();
   self.soundEffectMixerNode = nil;
   self.engine = nil;
   self.outputFormat = nil;
+  _pcmBuffer.reset();
 }
 
 - (double)currentPlaybackPositionLocked {
   if (self.sampleRate <= 0) return self.lastKnownPosition;
-  if (self.playerNode != nil && self.playerNode.isPlaying) {
-    AVAudioTime *renderTime = self.playerNode.lastRenderTime;
-    if (renderTime != nil) {
-      AVAudioTime *playerTime = [self.playerNode playerTimeForNodeTime:renderTime];
-      if (playerTime != nil) {
-        self.lastKnownPosition = MAX(0, (double)(self.playbackAnchorFrame + playerTime.sampleTime) / self.sampleRate);
-      }
-    }
-  } else {
-    self.lastKnownPosition = MAX(self.lastKnownPosition, self.sampleRate > 0 ? (double)self.completedFrames / self.sampleRate : self.lastKnownPosition);
-  }
+  int64_t renderedFrames = _renderedFrames.load(std::memory_order_acquire);
+  self.completedFrames = self.playbackAnchorFrame + renderedFrames;
+  self.lastKnownPosition = MAX(0, (double)self.completedFrames / self.sampleRate);
   return self.lastKnownPosition;
 }
 
@@ -2176,12 +2850,13 @@ RCT_EXPORT_MODULE();
   [self.streamCondition unlock];
 
   if (self.sampleRate > 0) {
-    buffered = MAX(buffered, position + MAX(0, (double)self.queuedFrames / self.sampleRate));
+    int64_t queuedFrames = [self currentQueuedFrameCountLocked];
+    buffered = MAX(buffered, position + MAX(0, (double)queuedFrames / self.sampleRate));
 
     NSUInteger availableCompressedBytes = streamLength > readOffset ? streamLength - readOffset : 0;
     if (readOffset > 0 && self.decodedFramesCursor > 0 && availableCompressedBytes > 0) {
       double estimatedDecodedFrames = ((double)availableCompressedBytes * (double)self.decodedFramesCursor) / (double)readOffset;
-      buffered = MAX(buffered, position + ((double)self.queuedFrames + estimatedDecodedFrames) / self.sampleRate);
+      buffered = MAX(buffered, position + ((double)queuedFrames + estimatedDecodedFrames) / self.sampleRate);
     }
   }
 
@@ -2194,6 +2869,62 @@ RCT_EXPORT_MODULE();
   return buffered;
 }
 
+- (OSStatus)renderSourceFramesToBufferList:(AudioBufferList *)outputData
+                                 frameCount:(AVAudioFrameCount)frameCount
+                                  isSilence:(BOOL *)isSilence
+                                  timestamp:(const AudioTimeStamp *)timestamp {
+  if (outputData == NULL || frameCount == 0) {
+    if (isSilence != NULL) *isSilence = YES;
+    return noErr;
+  }
+
+  UInt32 bufferCount = outputData->mNumberBuffers;
+  float **channelPointers = (float **)alloca(sizeof(float *) * MAX((UInt32)1, bufferCount));
+  for (UInt32 channel = 0; channel < bufferCount; channel++) {
+    channelPointers[channel] = (float *)outputData->mBuffers[channel].mData;
+    if (channelPointers[channel] != NULL) memset(channelPointers[channel], 0, (size_t)frameCount * sizeof(float));
+  }
+
+  if (_stopRequestedFlag.load(std::memory_order_acquire) || !_sourceRenderingEnabled.load(std::memory_order_acquire) || _pcmBuffer == nullptr) {
+    if (isSilence != NULL) *isSilence = YES;
+    return noErr;
+  }
+
+  NSUInteger activeChannels = MIN((NSUInteger)bufferCount, self.channels);
+  size_t framesRead = _pcmBuffer->read(channelPointers, frameCount, activeChannels);
+  if (framesRead > 0) {
+    std::shared_ptr<LXRealtimePhaseVocoderPitchShifter> pitchProcessor = std::atomic_load_explicit(&_realtimePitchProcessor, std::memory_order_acquire);
+    if (pitchProcessor != nullptr) {
+      pitchProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels, _pitchPlaybackRate.load(std::memory_order_acquire));
+    }
+
+    std::shared_ptr<LXRealtimeConvolutionProcessor> convolutionProcessor = std::atomic_load_explicit(&_realtimeConvolutionProcessor, std::memory_order_acquire);
+    if (convolutionProcessor != nullptr) {
+      convolutionProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels);
+    }
+
+    std::shared_ptr<LXRealtimeSpatialPannerProcessor> pannerProcessor = std::atomic_load_explicit(&_realtimePannerProcessor, std::memory_order_acquire);
+    if (pannerProcessor != nullptr) {
+      pannerProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels);
+    }
+  }
+
+  _renderedFrames.fetch_add((int64_t)framesRead, std::memory_order_acq_rel);
+  if (isSilence != NULL) *isSilence = framesRead == 0;
+
+  int64_t generation = _renderPlaybackGeneration.load(std::memory_order_acquire);
+  int64_t remainingFrames = _pcmBuffer != nullptr ? (int64_t)_pcmBuffer->availableToRead() : 0;
+  if (_streamFinished.load(std::memory_order_acquire)) {
+    if (remainingFrames == 0 && !_stopRequestedFlag.load(std::memory_order_acquire)) {
+      [self scheduleEndedStateForGeneration:generation];
+    }
+  } else if (self.sampleRate > 0 && _sourceRenderingEnabled.load(std::memory_order_acquire) && ((double)remainingFrames / self.sampleRate) < 0.35) {
+    [self scheduleBufferingStateForGeneration:generation];
+  }
+
+  return noErr;
+}
+
 - (void)configureAudioGraphWithSampleRate:(double)sampleRate channels:(NSUInteger)channels bitsPerSample:(NSUInteger)bitsPerSample {
   dispatch_sync(self.renderQueue, ^{
     if (self.engine != nil) return;
@@ -2202,22 +2933,39 @@ RCT_EXPORT_MODULE();
                                                          sampleRate:sampleRate
                                                            channels:(AVAudioChannelCount)channels
                                                         interleaved:NO];
+    NSUInteger bufferCapacityFrames = MAX((NSUInteger)llround(sampleRate * MAX(self.maxBufferSeconds + 2.0, 12.0)), (NSUInteger)4096);
+    _pcmBuffer = std::make_unique<LXStreamingPlanarPCMBuffer>();
+    _pcmBuffer->reset(channels, bufferCapacityFrames);
+    [self resetRealtimeRenderStateLocked];
     self.engine = [[AVAudioEngine alloc] init];
-    self.playerNode = [[AVAudioPlayerNode alloc] init];
+    __weak typeof(self) weakSelf = self;
+    self.sourceNode = [[AVAudioSourceNode alloc] initWithFormat:self.outputFormat renderBlock:^OSStatus(BOOL *isSilence, const AudioTimeStamp *timestamp, AVAudioFrameCount frameCount, AudioBufferList *outputData) {
+      StreamingFlacPlayerModule *strongSelf = weakSelf;
+      if (strongSelf == nil) {
+        if (isSilence != NULL) *isSilence = YES;
+        if (outputData != NULL) {
+          for (UInt32 index = 0; index < outputData->mNumberBuffers; index++) {
+            if (outputData->mBuffers[index].mData != NULL) memset(outputData->mBuffers[index].mData, 0, outputData->mBuffers[index].mDataByteSize);
+          }
+        }
+        return noErr;
+      }
+      return [strongSelf renderSourceFramesToBufferList:outputData frameCount:frameCount isSilence:isSilence timestamp:timestamp];
+    }];
     self.timePitchNode = [[AVAudioUnitTimePitch alloc] init];
     self.equalizerNode = [[AVAudioUnitEQ alloc] initWithNumberOfBands:(NSUInteger)LXSoundEffectEqualizerFrequencies().count];
     self.reverbNode = [[AVAudioUnitReverb alloc] init];
     self.dryMixerNode = [[AVAudioMixerNode alloc] init];
     self.wetMixerNode = [[AVAudioMixerNode alloc] init];
     self.soundEffectMixerNode = [[AVAudioMixerNode alloc] init];
-    [self.engine attachNode:self.playerNode];
+    [self.engine attachNode:self.sourceNode];
     [self.engine attachNode:self.equalizerNode];
     [self.engine attachNode:self.timePitchNode];
     [self.engine attachNode:self.reverbNode];
     [self.engine attachNode:self.dryMixerNode];
     [self.engine attachNode:self.wetMixerNode];
     [self.engine attachNode:self.soundEffectMixerNode];
-    [self.engine connect:self.playerNode to:self.equalizerNode format:self.outputFormat];
+    [self.engine connect:self.sourceNode to:self.equalizerNode format:self.outputFormat];
     [self.engine connect:self.equalizerNode to:self.timePitchNode format:self.outputFormat];
     AVAudioConnectionPoint *dryConnectionPoint = [[AVAudioConnectionPoint alloc] initWithNode:self.dryMixerNode bus:0];
     AVAudioConnectionPoint *reverbConnectionPoint = [[AVAudioConnectionPoint alloc] initWithNode:self.reverbNode bus:0];
@@ -2229,12 +2977,12 @@ RCT_EXPORT_MODULE();
     [self.engine connect:self.dryMixerNode to:self.soundEffectMixerNode format:self.outputFormat];
     [self.engine connect:self.wetMixerNode to:self.soundEffectMixerNode format:self.outputFormat];
     [self.engine connect:self.soundEffectMixerNode to:self.engine.mainMixerNode format:self.outputFormat];
-    self.playerNode.volume = self.currentVolume;
     self.timePitchNode.rate = self.currentRate;
     self.reverbNode.wetDryMix = 100.0f;
     self.dryMixerNode.outputVolume = 1.0f;
     self.wetMixerNode.outputVolume = 0.0f;
     self.soundEffectMixerNode.pan = 0.0f;
+    self.soundEffectMixerNode.outputVolume = self.currentVolume;
     [self applySoundEffectConfigLocked];
     [self.engine prepare];
 
@@ -2253,18 +3001,21 @@ RCT_EXPORT_MODULE();
   if (self.engine != nil && !self.engine.isRunning) {
     if (![self.engine startAndReturnError:error]) return NO;
   }
-  if (self.playerNode != nil) self.playerNode.volume = self.currentVolume;
+  if (self.soundEffectMixerNode != nil) self.soundEffectMixerNode.outputVolume = self.currentVolume;
   if (self.timePitchNode != nil) self.timePitchNode.rate = self.currentRate;
   [self applySoundEffectConfigLocked];
   return YES;
 }
 
 - (void)maybeStartPlaybackLocked {
-  if (self.manualPause || self.playerNode == nil || self.sampleRate <= 0) return;
+  if (self.manualPause || self.sourceNode == nil || self.sampleRate <= 0) return;
   if (self.engine == nil || !self.engine.isRunning) return;
-  double queuedSeconds = (double)self.queuedFrames / self.sampleRate;
-  if (!self.playbackStarted && (queuedSeconds >= self.startThresholdSeconds || (self.downloadCompleted && self.queuedFrames > 0))) {
-    [self.playerNode play];
+  int64_t queuedFrames = [self currentQueuedFrameCountLocked];
+  double queuedSeconds = (double)queuedFrames / self.sampleRate;
+  if (!self.playbackStarted && (queuedSeconds >= self.startThresholdSeconds || (self.downloadCompleted && queuedFrames > 0))) {
+    _sourceRenderingEnabled.store(true, std::memory_order_release);
+    _bufferingNotificationScheduled.store(false, std::memory_order_release);
+    _endedNotificationScheduled.store(false, std::memory_order_release);
     self.playbackStarted = YES;
     [self emitState:@"playing" position:@(self.lastKnownPosition) duration:@(self.duration)];
   }
@@ -2272,13 +3023,12 @@ RCT_EXPORT_MODULE();
 
 - (void)waitForBufferCapacityIfNeeded {
   while (!self.stopRequested && !self.seekRequested) {
-    __block BOOL shouldWait = NO;
-    dispatch_sync(self.renderQueue, ^{
-      if (self.playerNode == nil || self.sampleRate <= 0) return;
-      double queuedSeconds = (double)self.queuedFrames / self.sampleRate;
+    BOOL shouldWait = NO;
+    if (self.sourceNode != nil && self.sampleRate > 0) {
+      double queuedSeconds = (double)[self currentQueuedFrameCountLocked] / self.sampleRate;
       double limit = self.manualPause ? self.pausedBufferSeconds : self.maxBufferSeconds;
       shouldWait = limit > 0 && queuedSeconds >= limit;
-    });
+    }
     if (!shouldWait) break;
     [NSThread sleepForTimeInterval:0.03];
   }
@@ -2310,9 +3060,9 @@ RCT_EXPORT_MODULE();
   }
 
   dispatch_sync(self.renderQueue, ^{
-    self.playbackGeneration += 1;
-    if (self.playerNode != nil) [self.playerNode stop];
-    self.queuedFrames = 0;
+    [self updatePlaybackGenerationLocked];
+    [self resetRealtimeRenderStateLocked];
+    [self rebuildRealtimeProcessorsLocked];
     self.completedFrames = self.seekTargetFrame;
     self.playbackAnchorFrame = self.seekTargetFrame;
     self.lastKnownPosition = clampedPosition;
@@ -2322,67 +3072,37 @@ RCT_EXPORT_MODULE();
 #endif
 
 - (void)schedulePCMBufferWithFrame:(const FLAC__Frame *)frame buffer:(const FLAC__int32 * const[])decodedBuffer startOffset:(NSUInteger)startOffset {
-  if (self.outputFormat == nil || self.streamError != nil) return;
+  if (self.outputFormat == nil || self.streamError != nil || _pcmBuffer == nullptr) return;
 
   const NSUInteger blockSize = frame->header.blocksize;
   if (startOffset >= blockSize) return;
 
   const NSUInteger playableFrames = blockSize - startOffset;
-  AVAudioPCMBuffer *pcmBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:self.outputFormat frameCapacity:(AVAudioFrameCount)playableFrames];
-  if (pcmBuffer == nil) {
-    self.streamError = LXError(@"streaming_flac_buffer", @"Failed to allocate PCM buffer");
-    return;
+  std::vector<std::vector<float>> pcmChannels(self.channels, std::vector<float>(playableFrames, 0));
+  std::vector<float *> channelPointers(self.channels, nullptr);
+  for (NSUInteger channel = 0; channel < self.channels; channel++) {
+    channelPointers[channel] = pcmChannels[channel].data();
   }
-
-  pcmBuffer.frameLength = (AVAudioFrameCount)playableFrames;
-  float *const *channels = pcmBuffer.floatChannelData;
   double scale = self.bitsPerSample > 1 ? ldexp(1.0, (int)self.bitsPerSample - 1) : 1.0;
   if (scale <= 0) scale = 1.0;
   for (NSUInteger channel = 0; channel < self.channels; channel++) {
     for (NSUInteger sample = 0; sample < playableFrames; sample++) {
       FLAC__int32 value = decodedBuffer[channel][sample + startOffset];
       double normalized = LXClampDouble((double)value / scale, -1.0, 1.0);
-      channels[channel][sample] = (float)normalized;
+      pcmChannels[channel][sample] = (float)normalized;
     }
   }
 
-  const int64_t queuedFrameCount = (int64_t)playableFrames;
-  __block int64_t generation = 0;
+  size_t writtenFrames = _pcmBuffer->write(channelPointers.data(), playableFrames, self.channels);
+  if (writtenFrames != playableFrames) {
+    self.streamError = LXError(@"streaming_flac_buffer", @"Streaming PCM ring buffer overflow");
+    [self emitErrorMessage:self.streamError.localizedDescription];
+    return;
+  }
+
   dispatch_sync(self.renderQueue, ^{
-    if (self.playerNode == nil || self.stopRequested) return;
-
-    if (self.pitchShifterEngine != nil) {
-      [self.pitchShifterEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels pitchFactor:LXSoundEffectPitchShifterPlaybackRate];
-    }
-    if (self.convolutionEngine != nil) {
-      [self.convolutionEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels];
-    }
-    if (self.spatialPannerEngine != nil) {
-      [self.spatialPannerEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels];
-    }
-
-    generation = self.playbackGeneration;
-    self.queuedFrames += queuedFrameCount;
-    [self.playerNode scheduleBuffer:pcmBuffer completionCallbackType:AVAudioPlayerNodeCompletionDataPlayedBack completionHandler:^(AVAudioPlayerNodeCompletionCallbackType callbackType) {
-      dispatch_async(self.renderQueue, ^{
-        if (generation != self.playbackGeneration) return;
-        self.completedFrames += queuedFrameCount;
-        self.queuedFrames = MAX(0, self.queuedFrames - queuedFrameCount);
-        self.lastKnownPosition = self.sampleRate > 0 ? (double)self.completedFrames / self.sampleRate : self.lastKnownPosition;
-        if (self.downloadCompleted && self.queuedFrames == 0 && !self.stopRequested) {
-          self.playbackStarted = NO;
-          [self emitEventWithType:@"ended" body:@{
-            @"state": @"stopped",
-            @"position": @(self.lastKnownPosition),
-            @"duration": @(self.duration),
-          }];
-        } else if (!self.downloadCompleted && self.playbackStarted && self.sampleRate > 0 && ((double)self.queuedFrames / self.sampleRate) < 0.35) {
-          [self.playerNode pause];
-          self.playbackStarted = NO;
-          [self emitState:@"buffering" position:@(self.lastKnownPosition) duration:@(self.duration)];
-        }
-      });
-    }];
+    if (self.sourceNode == nil || self.stopRequested) return;
+    [self currentQueuedFrameCountLocked];
     [self maybeStartPlaybackLocked];
   });
 }
@@ -2437,6 +3157,7 @@ RCT_EXPORT_MODULE();
       }
       if (FLAC__stream_decoder_get_state(self.decoder) == FLAC__STREAM_DECODER_END_OF_STREAM) {
         self.downloadCompleted = YES;
+        _streamFinished.store(true, std::memory_order_release);
         break;
       }
     }
@@ -2446,7 +3167,11 @@ RCT_EXPORT_MODULE();
     self.decoder = NULL;
 
     dispatch_async(self.renderQueue, ^{
-      if (self.downloadCompleted && self.queuedFrames == 0 && !self.stopRequested) {
+      if (self.downloadCompleted && [self currentQueuedFrameCountLocked] == 0 && !self.stopRequested &&
+          !_endedNotificationScheduled.exchange(true, std::memory_order_acq_rel)) {
+        self.lastKnownPosition = [self currentPlaybackPositionLocked];
+        self.playbackStarted = NO;
+        self.currentState = @"stopped";
         [self emitEventWithType:@"ended" body:@{
           @"state": @"stopped",
           @"position": @(self.lastKnownPosition),
@@ -2460,8 +3185,10 @@ RCT_EXPORT_MODULE();
 
 - (void)stopStreamingInternal:(BOOL)resetAudio {
   self.stopRequested = YES;
+  _stopRequestedFlag.store(true, std::memory_order_release);
   [self.streamCondition lock];
   self.downloadCompleted = YES;
+  _streamFinished.store(true, std::memory_order_release);
   [self.streamCondition broadcast];
   [self.streamCondition unlock];
   [self.task cancel];
@@ -2471,7 +3198,7 @@ RCT_EXPORT_MODULE();
   if (resetAudio) {
     dispatch_sync(self.renderQueue, ^{
       self.lastKnownPosition = [self currentPlaybackPositionLocked];
-      self.playbackGeneration += 1;
+      [self updatePlaybackGenerationLocked];
       [self cleanupAudioGraphLocked];
     });
   }
@@ -2484,6 +3211,7 @@ RCT_EXPORT_MODULE();
   self.task = nil;
   self.session = nil;
   self.downloadCompleted = YES;
+  _streamFinished.store(true, std::memory_order_release);
   [self.streamCondition lock];
   [self.streamCondition broadcast];
   [self.streamCondition unlock];
@@ -2493,11 +3221,13 @@ RCT_EXPORT_MODULE();
 
 - (void)restartDecoderLoopForSeek {
   self.stopRequested = YES;
+  _stopRequestedFlag.store(true, std::memory_order_release);
   [self.streamCondition lock];
   [self.streamCondition broadcast];
   [self.streamCondition unlock];
   dispatch_sync(self.decoderQueue, ^{});
   self.stopRequested = NO;
+  _stopRequestedFlag.store(false, std::memory_order_release);
   self.streamError = nil;
   self.readOffset = 0;
   [self startDecoderLoop];
@@ -2598,7 +3328,7 @@ RCT_REMAP_METHOD(pause, pauseStreamWithResolver:(RCTPromiseResolveBlock)resolve 
     self.manualPause = YES;
     self.interruptedBySystem = NO;
     if (self.engine != nil && self.engine.isRunning) [self.engine pause];
-    [self.playerNode pause];
+    _sourceRenderingEnabled.store(false, std::memory_order_release);
     self.playbackStarted = NO;
   });
   LXBeginReceivingRemoteControlEvents();
@@ -2641,9 +3371,9 @@ RCT_REMAP_METHOD(seekTo, seekToStream:(nonnull NSNumber *)position resolver:(RCT
 
   dispatch_sync(self.renderQueue, ^{
     self.lastKnownPosition = requestedPosition;
-    self.playbackGeneration += 1;
-    if (self.playerNode != nil) [self.playerNode stop];
-    self.queuedFrames = 0;
+    [self updatePlaybackGenerationLocked];
+    [self resetRealtimeRenderStateLocked];
+    [self rebuildRealtimeProcessorsLocked];
     self.completedFrames = self.sampleRate > 0 ? (int64_t)llround(requestedPosition * self.sampleRate) : 0;
     self.playbackAnchorFrame = self.completedFrames;
     self.playbackStarted = NO;
@@ -2664,7 +3394,7 @@ RCT_REMAP_METHOD(seekTo, seekToStream:(nonnull NSNumber *)position resolver:(RCT
 RCT_REMAP_METHOD(setVolume, setStreamVolume:(nonnull NSNumber *)volume resolver:(RCTPromiseResolveBlock)resolve rejecter:(RCTPromiseRejectBlock)reject) {
   self.currentVolume = [volume floatValue];
   dispatch_sync(self.renderQueue, ^{
-    if (self.playerNode != nil) self.playerNode.volume = self.currentVolume;
+    if (self.soundEffectMixerNode != nil) self.soundEffectMixerNode.outputVolume = self.currentVolume;
   });
   resolve(nil);
 }
@@ -2732,6 +3462,7 @@ RCT_REMAP_METHOD(getState, getStreamStateWithResolver:(RCTPromiseResolveBlock)re
     [self emitErrorMessage:error.localizedDescription ?: @"FLAC stream download failed"];
   }
   self.downloadCompleted = YES;
+  _streamFinished.store(true, std::memory_order_release);
   [self.streamCondition broadcast];
   [self.streamCondition unlock];
 }
