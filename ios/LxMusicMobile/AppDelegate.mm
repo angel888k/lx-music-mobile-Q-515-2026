@@ -1098,6 +1098,12 @@ static LXImpulseResponseData LXLoadImpulseResponse(NSURL *url, double targetSamp
 - (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels pitchFactor:(float)pitchFactor;
 @end
 
+@interface LXStreamingSpatialPannerEngine : NSObject
+- (instancetype)initWithSampleRate:(double)sampleRate soundR:(float)soundR speed:(float)speed;
+- (void)updateSoundR:(float)soundR speed:(float)speed;
+- (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels;
+@end
+
 @implementation LXStreamingConvolutionEngine {
   NSUInteger _blockSize;
   NSUInteger _fftSize;
@@ -1304,6 +1310,84 @@ static LXImpulseResponseData LXLoadImpulseResponse(NSURL *url, double targetSamp
     } else {
       for (NSUInteger channel = 0; channel < usedChannels; channel++) channels[channel][frame] = 0;
     }
+  }
+}
+@end
+
+struct LXStreamingPannerDelayLine {
+  std::vector<float> buffer;
+  NSUInteger writeIndex = 0;
+
+  explicit LXStreamingPannerDelayLine(NSUInteger size) : buffer(MAX(size, (NSUInteger)1), 0), writeIndex(0) {}
+
+  float pushAndRead(float input, NSUInteger delaySamples) {
+    NSUInteger bufferCount = (NSUInteger)buffer.size();
+    NSUInteger clampedDelay = MIN(delaySamples, bufferCount > 0 ? bufferCount - 1 : 0);
+    buffer[writeIndex] = input;
+    NSUInteger readIndex = (writeIndex + bufferCount - clampedDelay) % bufferCount;
+    float output = buffer[readIndex];
+    writeIndex += 1;
+    if (writeIndex >= bufferCount) writeIndex = 0;
+    return output;
+  }
+};
+
+@implementation LXStreamingSpatialPannerEngine {
+  double _sampleRate;
+  double _processedSamples;
+  NSUInteger _maxDelaySamples;
+  LXStreamingPannerDelayLine _leftDelay;
+  LXStreamingPannerDelayLine _rightDelay;
+  float _soundR;
+  float _speed;
+}
+
+- (instancetype)initWithSampleRate:(double)sampleRate soundR:(float)soundR speed:(float)speed {
+  self = [super init];
+  if (self == nil) return nil;
+  _sampleRate = sampleRate;
+  _processedSamples = 0;
+  _maxDelaySamples = MAX((NSUInteger)llround(sampleRate * 0.00075), (NSUInteger)1);
+  _leftDelay = LXStreamingPannerDelayLine(_maxDelaySamples + 2);
+  _rightDelay = LXStreamingPannerDelayLine(_maxDelaySamples + 2);
+  [self updateSoundR:soundR speed:speed];
+  return self;
+}
+
+- (void)updateSoundR:(float)soundR speed:(float)speed {
+  _soundR = fmaxf(0.1f, fminf(soundR / 10.0f, 3.0f));
+  _speed = fmaxf(1.0f, fminf(speed, 50.0f));
+}
+
+- (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels {
+  if (channels == NULL || activeChannels < 2 || _sampleRate <= 0) return;
+
+  for (NSUInteger frame = 0; frame < frameCount; frame++) {
+    double phaseStep = (M_PI / 180.0) / (MAX((double)_speed * 0.01, 0.1) * _sampleRate);
+    float angle = (float)(_processedSamples * phaseStep);
+    float x = sinf(angle) * _soundR;
+    float y = cosf(angle) * _soundR;
+    float z = cosf(angle) * _soundR;
+    float distance = sqrtf(x * x + y * y + z * z);
+    float attenuation = 1.0f / (1.0f + 0.18f * distance);
+    float normalizedX = fmaxf(-1.0f, fminf(1.0f, x / fmaxf(_soundR, 0.0001f)));
+    float leftGain = attenuation * sqrtf(0.5f * (1.0f - normalizedX));
+    float rightGain = attenuation * sqrtf(0.5f * (1.0f + normalizedX));
+    float backFactor = z > 0 ? fmaxf(0.72f, 1.0f - 0.12f * z) : 1.0f;
+    float sidePreserve = 0.28f * attenuation;
+    NSUInteger itdSamples = (NSUInteger)llroundf(fabsf(normalizedX) * (float)_maxDelaySamples);
+
+    float inputLeft = channels[0][frame];
+    float inputRight = channels[1][frame];
+    float mid = 0.5f * (inputLeft + inputRight);
+    float side = 0.5f * (inputLeft - inputRight);
+
+    float delayedLeft = _leftDelay.pushAndRead(mid * leftGain * backFactor, normalizedX > 0 ? itdSamples : 0);
+    float delayedRight = _rightDelay.pushAndRead(mid * rightGain * backFactor, normalizedX < 0 ? itdSamples : 0);
+
+    channels[0][frame] = fmaxf(fminf(delayedLeft + side * sidePreserve, 1.0f), -1.0f);
+    channels[1][frame] = fmaxf(fminf(delayedRight - side * sidePreserve, 1.0f), -1.0f);
+    _processedSamples += 1.0;
   }
 }
 @end
@@ -1639,6 +1723,7 @@ RCT_REMAP_METHOD(updateEqualizerConfig, updateEqualizerConfig:(NSDictionary *)co
 @property (nonatomic, strong) AVAudioMixerNode *soundEffectMixerNode;
 @property (nonatomic, strong) LXStreamingConvolutionEngine *convolutionEngine;
 @property (nonatomic, strong) LXStreamingPhaseVocoderPitchShifter *pitchShifterEngine;
+@property (nonatomic, strong) LXStreamingSpatialPannerEngine *spatialPannerEngine;
 @property (nonatomic, strong) AVAudioFormat *outputFormat;
 @property (nonatomic, strong) dispatch_source_t pannerTimer;
 @property (nonatomic, copy) NSString *convolutionAssetKey;
@@ -1833,6 +1918,7 @@ RCT_EXPORT_MODULE();
   self.soundEffectMixerNode = nil;
   self.convolutionEngine = nil;
   self.pitchShifterEngine = nil;
+  self.spatialPannerEngine = nil;
   self.convolutionAssetKey = nil;
   self.pannerTimer = nil;
   self.pannerPhase = 0.0f;
@@ -1849,36 +1935,16 @@ RCT_EXPORT_MODULE();
     dispatch_source_cancel(self.pannerTimer);
     self.pannerTimer = nil;
   }
+  self.spatialPannerEngine = nil;
   self.pannerPhase = 0.0f;
   if (self.soundEffectMixerNode != nil) self.soundEffectMixerNode.pan = 0.0f;
 }
 
 - (void)restartPannerLockedWithSoundR:(float)soundR speed:(float)speed {
   [self stopPannerLocked];
-  if (self.soundEffectMixerNode == nil) return;
-
-  float amplitude = fminf(fmaxf(soundR / 10.0f, 0.0f), 1.0f);
-  NSTimeInterval interval = MAX(0.02, speed * 0.002);
-  dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, self.renderQueue);
-  if (timer == nil) {
-    self.soundEffectMixerNode.pan = 0.0f;
-    return;
-  }
-
-  self.pannerTimer = timer;
+  if (self.sampleRate <= 0 || self.channels < 2) return;
+  self.spatialPannerEngine = [[LXStreamingSpatialPannerEngine alloc] initWithSampleRate:self.sampleRate soundR:soundR speed:speed];
   self.soundEffectMixerNode.pan = 0.0f;
-  dispatch_source_set_timer(timer,
-                            dispatch_time(DISPATCH_TIME_NOW, (int64_t)(interval * NSEC_PER_SEC)),
-                            (uint64_t)(interval * NSEC_PER_SEC),
-                            (uint64_t)(0.01 * NSEC_PER_SEC));
-  StreamingFlacPlayerModule *module = self;
-  dispatch_source_set_event_handler(timer, ^{
-    if (module == nil || module.soundEffectMixerNode == nil) return;
-    module.pannerPhase += (float)(M_PI / 180.0);
-    if (module.pannerPhase > (float)(M_PI * 2.0)) module.pannerPhase -= (float)(M_PI * 2.0);
-    module.soundEffectMixerNode.pan = sinf(module.pannerPhase) * amplitude;
-  });
-  dispatch_resume(timer);
 }
 
 - (BOOL)refreshConvolutionEngineLockedWithAssetUri:(NSString *)assetUri fileName:(NSString *)fileName mainGain:(float)mainGain sendGain:(float)sendGain {
@@ -1956,6 +2022,12 @@ RCT_EXPORT_MODULE();
     self.convolutionAssetKey = nil;
   }
   [self refreshPitchShifterEngineLockedWithPitchFactor:pitchPlaybackRate];
+  if (pannerEnabled) {
+    if (self.spatialPannerEngine == nil) [self restartPannerLockedWithSoundR:pannerSoundR speed:pannerSpeed];
+    else [self.spatialPannerEngine updateSoundR:pannerSoundR speed:pannerSpeed];
+  } else {
+    [self stopPannerLocked];
+  }
 
   self.equalizerNode.globalGain = 0.0f;
   self.equalizerNode.bypass = !enabled;
@@ -1984,8 +2056,6 @@ RCT_EXPORT_MODULE();
   if (self.dryMixerNode != nil) self.dryMixerNode.outputVolume = usesTrueConvolution ? 1.0f : (hasConvolution ? (convolutionMainGain / 10.0f) : 1.0f);
   if (self.wetMixerNode != nil) self.wetMixerNode.outputVolume = usesTrueConvolution ? 0.0f : (hasConvolution ? (convolutionSendGain / 10.0f) : 0.0f);
 
-  if (pannerEnabled) [self restartPannerLockedWithSoundR:pannerSoundR speed:pannerSpeed];
-  else [self stopPannerLocked];
 }
 
 - (void)handleAudioSessionInterruption:(NSNotification *)notification {
@@ -2281,6 +2351,9 @@ RCT_EXPORT_MODULE();
     }
     if (self.convolutionEngine != nil) {
       [self.convolutionEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels];
+    }
+    if (self.spatialPannerEngine != nil) {
+      [self.spatialPannerEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels];
     }
 
     generation = self.playbackGeneration;

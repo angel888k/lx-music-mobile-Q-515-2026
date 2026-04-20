@@ -239,6 +239,81 @@ private final class LXPhaseVocoderPitchShifter {
     }
 }
 
+private final class LXSpatialPannerEngine {
+    private struct DelayLine {
+        var buffer: [Float]
+        var writeIndex = 0
+
+        init(size: Int) {
+            buffer = Array(repeating: 0, count: max(size, 1))
+        }
+
+        mutating func pushAndRead(_ input: Float, delaySamples: Int) -> Float {
+            let bufferCount = buffer.count
+            let clampedDelay = max(0, min(delaySamples, bufferCount - 1))
+            buffer[writeIndex] = input
+            let readIndex = (writeIndex - clampedDelay + bufferCount) % bufferCount
+            let output = buffer[readIndex]
+            writeIndex += 1
+            if writeIndex >= bufferCount {
+                writeIndex = 0
+            }
+            return output
+        }
+    }
+
+    private let sampleRate: Double
+    private var processedSamples: Double = 0
+    private var maxDelaySamples: Int
+    private var leftDelay = DelayLine(size: 1)
+    private var rightDelay = DelayLine(size: 1)
+    private var soundR: Float = 0.5
+    private var speed: Float = 25
+
+    init(sampleRate: Double, soundR: Float, speed: Float) {
+        self.sampleRate = sampleRate
+        self.maxDelaySamples = max(Int(round(sampleRate * 0.00075)), 1)
+        self.leftDelay = DelayLine(size: maxDelaySamples + 2)
+        self.rightDelay = DelayLine(size: maxDelaySamples + 2)
+        update(soundR: soundR, speed: speed)
+    }
+
+    func update(soundR: Float, speed: Float) {
+        self.soundR = max(0.1, min(soundR / 10, 3))
+        self.speed = max(1, min(speed, 50))
+    }
+
+    func processFrame(_ samples: inout [Float], activeChannels: Int) {
+        guard activeChannels >= 2, sampleRate > 0 else { return }
+
+        let phaseStep = (Double.pi / 180.0) / (max(Double(speed) * 0.01, 0.1) * sampleRate)
+        let angle = Float(processedSamples * phaseStep)
+        let x = sin(angle) * soundR
+        let y = cos(angle) * soundR
+        let z = cos(angle) * soundR
+        let distance = sqrt(x * x + y * y + z * z)
+        let attenuation = 1 / (1 + 0.18 * distance)
+        let normalizedX = max(-1, min(1, x / max(soundR, 0.0001)))
+        let leftGain = attenuation * sqrt(0.5 * (1 - normalizedX))
+        let rightGain = attenuation * sqrt(0.5 * (1 + normalizedX))
+        let backFactor = z > 0 ? max(0.72, 1 - 0.12 * z) : 1
+        let sidePreserve = 0.28 * attenuation
+        let itdSamples = Int(round(abs(normalizedX) * Float(maxDelaySamples)))
+
+        let inputLeft = samples[0]
+        let inputRight = samples[1]
+        let mid = 0.5 * (inputLeft + inputRight)
+        let side = 0.5 * (inputLeft - inputRight)
+
+        let delayedLeft = leftDelay.pushAndRead(mid * leftGain * backFactor, delaySamples: normalizedX > 0 ? itdSamples : 0)
+        let delayedRight = rightDelay.pushAndRead(mid * rightGain * backFactor, delaySamples: normalizedX < 0 ? itdSamples : 0)
+
+        samples[0] = max(min(delayedLeft + side * sidePreserve, 1), -1)
+        samples[1] = max(min(delayedRight - side * sidePreserve, 1), -1)
+        processedSamples += 1
+    }
+}
+
 struct LXSoundEffectConfiguration {
     var equalizerEnabled = false
     var gains = LXEqualizerAudioMixController.normalizeGains([])
@@ -315,12 +390,12 @@ final class LXEqualizerAudioMixController {
     private var eqStates: [[LXBiquadState]] = []
     private var convolutionEngine: LXConvolutionEngine?
     private var pitchEngine: LXPhaseVocoderPitchShifter?
+    private var pannerEngine: LXSpatialPannerEngine?
     private var sampleRate: Double = 0
     private var channelsPerFrame = 0
     private var bitsPerChannel: UInt32 = 0
     private var isFloat = false
     private var isInterleaved = false
-    private var processedSamples: Double = 0
 
     init(enabled: Bool, gains: [Float]) {
         updateConfig(enabled: enabled, gains: gains)
@@ -429,10 +504,10 @@ final class LXEqualizerAudioMixController {
         bitsPerChannel = 0
         isFloat = false
         isInterleaved = false
-        processedSamples = 0
         eqStates.removeAll(keepingCapacity: false)
         convolutionEngine = nil
         pitchEngine = nil
+        pannerEngine = nil
         coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
     }
 
@@ -454,9 +529,10 @@ final class LXEqualizerAudioMixController {
             : nil
 
         pitchEngine = config.hasPitchShift ? LXPhaseVocoderPitchShifter(channelCount: channelsPerFrame) : nil
-        if resetTime {
-            processedSamples = 0
-        }
+        pannerEngine = config.hasPanner && channelsPerFrame >= 2
+            ? LXSpatialPannerEngine(sampleRate: sampleRate, soundR: config.pannerSoundR, speed: config.pannerSpeed)
+            : nil
+        pannerEngine?.update(soundR: config.pannerSoundR, speed: config.pannerSpeed)
     }
 
     private func process(
@@ -619,7 +695,6 @@ final class LXEqualizerAudioMixController {
         processConvolution(&samples, activeChannels: activeChannels)
 
         applyPanner(to: &samples, activeChannels: activeChannels)
-        processedSamples += 1
     }
 
     private func processEqualizer(_ sample: Float, channel: Int) -> Float {
@@ -659,15 +734,8 @@ final class LXEqualizerAudioMixController {
     }
 
     private func applyPanner(to samples: inout [Float], activeChannels: Int) {
-        guard config.hasPanner, activeChannels >= 2, sampleRate > 0 else { return }
-
-        let amplitude = min(max(config.pannerSoundR / 10, 0), 1)
-        let phaseStep = Float((Double.pi / 180.0) / (max(Double(config.pannerSpeed) * 0.002, 0.02) * sampleRate))
-        let pan = sin(Float(processedSamples) * phaseStep) * amplitude
-        let leftGain: Float = pan > 0 ? 1 - pan : 1
-        let rightGain: Float = pan < 0 ? 1 + pan : 1
-        samples[0] *= leftGain
-        samples[1] *= rightGain
+        guard let engine = pannerEngine else { return }
+        engine.processFrame(&samples, activeChannels: activeChannels)
     }
 
     static func normalizeGains(_ gains: [Float]) -> [Float] {
