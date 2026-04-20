@@ -3,6 +3,7 @@ import {
   equalizerFrequencies,
   getEqualizerBandSettingKey,
   isSoundEffectSettingKey,
+  isSoundEffectActive,
   normalizeEqualizerGain,
 } from './constants'
 import { nativeEqualizerAdapter } from './adapters/nativeEqualizerAdapter'
@@ -64,9 +65,10 @@ const createSupportState = (adapters: readonly SoundEffectAdapter[]): SoundEffec
 
 const buildCurrentEqualizerConfig = (gainsOverride?: Partial<Record<EqualizerFrequency, number>>): SoundEffectEqualizerConfig => {
   const setting = settingState.setting
+  const gains = equalizerFrequencies.map(frequency => normalizeEqualizerGain(gainsOverride?.[frequency] ?? setting[getEqualizerBandSettingKey(frequency)]))
   return {
-    enabled: setting['player.soundEffect.enabled'],
-    gains: equalizerFrequencies.map(frequency => normalizeEqualizerGain(gainsOverride?.[frequency] ?? setting[getEqualizerBandSettingKey(frequency)])),
+    enabled: gainsOverride == null ? isSoundEffectActive(setting) : gains.some(gain => gain != 0),
+    gains,
   }
 }
 

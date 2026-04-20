@@ -49,7 +49,7 @@ export default memo(() => {
         <Title />
         <DesktopLyricBtn />
         <CommentBtn />
-        <Btn icon="slider" onPress={showSetting} />
+        <Btn icon="setting" onPress={showSetting} />
       </View>
       <SettingPopup ref={popupRef} position="left" direction="horizontal" />
     </View>

@@ -368,6 +368,7 @@
   "setting_play_sound_effect_preset_deep": "Deep",
   "setting_play_sound_effect_preset_loudness": "Loudness",
   "setting_play_sound_effect_preset_custom": "Custom",
+  "setting_play_sound_effect_reset": "Reset",
   "setting_play_sound_effect_tip": "This first pass ports the desktop 10-band EQ presets. The effect currently applies on the native iOS FLAC playback path, and the rest of the iOS playback pipeline will be wired in later.",
   "setting_play_show_bluetooth_lyric": "Show lyrics from bluetooth",
   "setting_play_show_notification_image": "Show album cover in notification bar",

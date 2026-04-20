@@ -12,8 +12,6 @@ import IsShowLyricTranslation from './IsShowLyricTranslation'
 import IsShowLyricRoma from './IsShowLyricRoma'
 import IsS2T from './IsS2T'
 import MaxCache from './MaxCache'
-import SoundEffect from './SoundEffect'
-import { soundEffectController } from '@/plugins/player/soundEffect'
 import { useI18n } from '@/lang'
 import { isDesktopLyricSupported } from '@/utils/nativeModules/lyricDesktop'
 
@@ -32,7 +30,6 @@ export default memo(() => {
       <IsShowLyricTranslation />
       <IsShowLyricRoma />
       <IsS2T />
-      {soundEffectController.isSupported ? <SoundEffect /> : null}
       <MaxCache />
       <PlayHighQuality />
     </Section>

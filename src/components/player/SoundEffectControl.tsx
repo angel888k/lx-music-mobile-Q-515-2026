@@ -8,8 +8,6 @@ import { useI18n } from '@/lang'
 import { createStyle } from '@/utils/tools'
 import { useTheme } from '@/store/theme/hook'
 import { useSetting } from '@/store/setting/hook'
-import CheckBoxItem from '../../components/CheckBoxItem'
-import SubTitle from '../../components/SubTitle'
 import {
   createEqualizerGainsRecord,
   createCustomBandSettingPatch,
@@ -17,6 +15,7 @@ import {
   equalizerFrequencies,
   equalizerPresets,
   getEqualizerGains,
+  isSoundEffectActive,
   soundEffectController,
 } from '@/plugins/player/soundEffect'
 
@@ -26,14 +25,16 @@ type PreviewGains = Record<typeof equalizerFrequencies[number], number>
 
 const formatGain = (gain: number) => `${gain > 0 ? '+' : ''}${gain.toFixed(1)}dB`
 
-export default memo(() => {
+export default memo(({ showTip = true }: {
+  showTip?: boolean
+}) => {
   const t = useI18n()
   const theme = useTheme()
   const setting = useSetting()
   const [previewGains, setPreviewGains] = useState<PreviewGains>(() => getEqualizerGains(setting))
 
   const presetId = setting['player.soundEffect.preset']
-  const enabled = setting['player.soundEffect.enabled']
+  const isActive = isSoundEffectActive(setting)
 
   useEffect(() => {
     setPreviewGains(getEqualizerGains(setting))
@@ -48,16 +49,16 @@ export default memo(() => {
     )
   }, [presetId, t, theme])
 
-  const handleToggle = (check: boolean) => {
-    updateSetting({ 'player.soundEffect.enabled': check })
+  const handleReset = () => {
+    updateSetting(createPresetSettingPatch('none'))
   }
 
-  const handlePresetPress = (presetId: Exclude<LX.SoundEffectPresetId, 'custom'>) => {
-    const preset = equalizerPresets.find(item => item.id == presetId)
+  const handlePresetPress = (nextPresetId: Exclude<LX.SoundEffectPresetId, 'custom'>) => {
+    const preset = equalizerPresets.find(item => item.id == nextPresetId)
     if (!preset) return
     const nextPreview = createEqualizerGainsRecord(preset.gains)
     setPreviewGains(nextPreview)
-    updateSetting(createPresetSettingPatch(presetId))
+    updateSetting(createPresetSettingPatch(nextPresetId))
   }
 
   const handleValueChange = (frequency: typeof equalizerFrequencies[number], value: number) => {
@@ -73,15 +74,22 @@ export default memo(() => {
   }
 
   const handleSlidingComplete = (frequency: typeof equalizerFrequencies[number], value: number) => {
-    updateSetting(createCustomBandSettingPatch(frequency, value))
+    updateSetting(createCustomBandSettingPatch(frequency, value, setting))
   }
 
   return (
-    <SubTitle title={t('setting_play_sound_effect')}>
-      <CheckBoxItem check={enabled} onChange={handleToggle} label={t('setting_play_sound_effect_enable')} />
-      <View style={styles.tip}>
-        <Text size={12} color={theme['c-font-label']}>{t('setting_play_sound_effect_tip')}</Text>
+    <View style={styles.container}>
+      <View style={styles.header}>
+        <Text>{isActive ? t('setting_play_sound_effect_preset') : t('setting_play_sound_effect_preset_none')}</Text>
+        <TouchableOpacity activeOpacity={0.7} onPress={handleReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
+          <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
+        </TouchableOpacity>
       </View>
+      {showTip ? (
+        <View style={styles.tip}>
+          <Text size={12} color={theme['c-font-label']}>{t('setting_play_sound_effect_tip')}</Text>
+        </View>
+      ) : null}
 
       <View style={styles.presetHeader}>
         <Text>{t('setting_play_sound_effect_preset')}</Text>
@@ -96,10 +104,10 @@ export default memo(() => {
               activeOpacity={0.7}
               style={{
                 ...styles.presetButton,
-                backgroundColor: isActive ? theme['c-primary'] : theme['c-button-background'],
+                backgroundColor: isActive ? theme['c-button-background-selected'] : theme['c-button-background'],
               }}
               onPress={() => { handlePresetPress(preset.id) }}>
-              <Text size={13} color={isActive ? theme['c-primary-font'] : theme['c-button-font']}>
+              <Text size={13} color={isActive ? theme['c-button-font-selected'] : theme['c-button-font']}>
                 {t(preset.nameKey)}
               </Text>
             </TouchableOpacity>
@@ -125,20 +133,36 @@ export default memo(() => {
           </View>
         ))}
       </View>
-    </SubTitle>
+    </View>
   )
 })
 
 const styles = createStyle({
+  container: {
+    paddingTop: 5,
+    paddingLeft: 15,
+    paddingRight: 15,
+    paddingBottom: 15,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+    gap: 12,
+  },
+  resetButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
   tip: {
-    marginRight: 15,
     marginBottom: 10,
   },
   presetHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     marginBottom: 10,
-    marginRight: 15,
   },
   customPresetBadge: {
     marginLeft: 10,
@@ -159,9 +183,7 @@ const styles = createStyle({
     marginRight: 10,
     marginBottom: 10,
   },
-  bandList: {
-    marginRight: 15,
-  },
+  bandList: {},
   bandItem: {
     marginBottom: 6,
   },

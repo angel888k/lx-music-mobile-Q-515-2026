@@ -96,6 +96,10 @@ export const createEqualizerGainsRecord = (gains?: readonly number[]) => {
 
 export const normalizeEqualizerGain = (gain: number) => Math.round(gain * 10) / 10
 
+export const hasEnabledEqualizerGains = (gains: readonly number[]) => {
+  return gains.some(gain => normalizeEqualizerGain(gain) != 0)
+}
+
 export const getEqualizerPreset = (presetId: LX.SoundEffectPresetId) => {
   return equalizerPresets.find(preset => preset.id == presetId) ?? equalizerPresets[0]
 }
@@ -104,22 +108,33 @@ export const getEqualizerGains = (setting = settingState.setting) => {
   return createEqualizerGainsRecord(equalizerFrequencies.map(frequency => setting[getEqualizerBandSettingKey(frequency)]))
 }
 
-export const createPresetSettingPatch = (presetId: Exclude<LX.SoundEffectPresetId, 'custom'>): Partial<LX.AppSetting> => {
-  const preset = getEqualizerPreset(presetId)
+export const isSoundEffectActive = (setting = settingState.setting) => {
+  return hasEnabledEqualizerGains(equalizerFrequencies.map(frequency => setting[getEqualizerBandSettingKey(frequency)]))
+}
+
+const createEqualizerSettingPatch = (presetId: LX.SoundEffectPresetId, gains: readonly number[]): Partial<LX.AppSetting> => {
   const patch: Partial<LX.AppSetting> = {
-    'player.soundEffect.preset': preset.id,
+    'player.soundEffect.preset': hasEnabledEqualizerGains(gains) ? presetId : 'none',
+    'player.soundEffect.enabled': hasEnabledEqualizerGains(gains),
   }
   equalizerFrequencies.forEach((frequency, index) => {
-    patch[getEqualizerBandSettingKey(frequency)] = preset.gains[index]
+    patch[getEqualizerBandSettingKey(frequency)] = normalizeEqualizerGain(gains[index] ?? 0)
   })
   return patch
 }
 
-export const createCustomBandSettingPatch = (frequency: EqualizerFrequency, gain: number): Partial<LX.AppSetting> => {
-  return {
-    'player.soundEffect.preset': 'custom',
-    [getEqualizerBandSettingKey(frequency)]: normalizeEqualizerGain(gain),
-  }
+export const createPresetSettingPatch = (presetId: Exclude<LX.SoundEffectPresetId, 'custom'>): Partial<LX.AppSetting> => {
+  const preset = getEqualizerPreset(presetId)
+  return createEqualizerSettingPatch(preset.id, preset.gains)
+}
+
+export const createCustomBandSettingPatch = (
+  frequency: EqualizerFrequency,
+  gain: number,
+  setting = settingState.setting,
+): Partial<LX.AppSetting> => {
+  const nextGains = equalizerFrequencies.map(item => item == frequency ? gain : setting[getEqualizerBandSettingKey(item)])
+  return createEqualizerSettingPatch('custom', nextGains)
 }
 
 export const isSoundEffectSettingKey = (key: keyof LX.AppSetting): key is SoundEffectSettingKey => {

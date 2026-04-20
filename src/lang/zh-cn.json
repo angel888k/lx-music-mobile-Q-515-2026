@@ -368,6 +368,7 @@
   "setting_play_sound_effect_preset_deep": "沉浸感",
   "setting_play_sound_effect_preset_loudness": "响度",
   "setting_play_sound_effect_preset_custom": "自定义",
+  "setting_play_sound_effect_reset": "重置",
   "setting_play_sound_effect_tip": "当前先接入桌面端的 10 段均衡器预设，效果会在 iOS 原生 FLAC 播放链路生效，其他音源链路后续继续补齐。",
   "setting_play_show_bluetooth_lyric": "显示蓝牙歌词",
   "setting_play_show_notification_image": "在通知栏显示歌曲专辑封面图片",
