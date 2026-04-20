@@ -24,81 +24,216 @@ private struct LXBiquadState {
     var z2: Float = 0
 }
 
-private struct LXPitchShifterState {
-    var buffer: [Float]
-    var writeIndex = 0
-    var phase: Float = 0
-    let windowSize: Int
-
-    init(windowSize: Int) {
-        self.windowSize = max(windowSize, 512)
-        self.buffer = Array(repeating: 0, count: self.windowSize * 3 + 2)
+private final class LXPhaseVocoderPitchShifter {
+    private struct ChannelState {
+        var inputBuffer: [Float]
+        var outputBuffer: [Float]
+        var hopInput: [Float]
+        var outputQueue: [Float]
     }
 
-    mutating func process(_ input: Float, factor: Float) -> Float {
-        buffer[writeIndex] = input
+    private let blockSize: Int
+    private let hopSize: Int
+    private let overlapCount: Float
+    private let channelCount: Int
+    private let fftSetup: FFTSetup
+    private let log2n: vDSP_Length
+    private let hannWindow: [Float]
+    private var channels: [ChannelState]
+    private var hopFill = 0
+    private var outputReadIndex = 0
+    private var timeCursor = 0
 
-        guard abs(factor - 1) > 0.001 else {
-            advanceWriteIndex()
-            return input
-        }
+    init?(channelCount: Int, blockSize: Int = 4096, hopSize: Int = 128) {
+        guard blockSize > hopSize, blockSize % hopSize == 0 else { return nil }
 
-        let phaseA = phase
-        let phaseB = wrappedPhase(phase + Float(windowSize) * 0.5)
-        let baseDelay = Float(windowSize)
-        let sampleA = read(delay: baseDelay + phaseA)
-        let sampleB = read(delay: baseDelay + phaseB)
-        let gainA = triangle(phaseA / Float(windowSize))
-        let gainB = triangle(phaseB / Float(windowSize))
-        let output = sampleA * gainA + sampleB * gainB
+        let log2Value = Int(log2(Double(blockSize)))
+        guard (1 << log2Value) == blockSize else { return nil }
+        guard let setup = vDSP_create_fftsetup(vDSP_Length(log2Value), FFTRadix(kFFTRadix2)) else { return nil }
 
-        phase = wrappedPhase(phase + (1 - factor))
-        advanceWriteIndex()
-        return max(min(output, 1), -1)
+        self.blockSize = blockSize
+        self.hopSize = hopSize
+        self.overlapCount = Float(blockSize / hopSize)
+        self.channelCount = max(channelCount, 1)
+        self.fftSetup = setup
+        self.log2n = vDSP_Length(log2Value)
+        self.hannWindow = LXPhaseVocoderPitchShifter.makeHannWindow(length: blockSize)
+        self.channels = Array(
+            repeating: ChannelState(
+                inputBuffer: Array(repeating: 0, count: blockSize),
+                outputBuffer: Array(repeating: 0, count: blockSize),
+                hopInput: Array(repeating: 0, count: hopSize),
+                outputQueue: Array(repeating: 0, count: hopSize)
+            ),
+            count: self.channelCount
+        )
     }
 
-    private mutating func advanceWriteIndex() {
-        writeIndex += 1
-        if writeIndex >= buffer.count {
-            writeIndex = 0
+    deinit {
+        vDSP_destroy_fftsetup(fftSetup)
+    }
+
+    func processFrame(_ samples: inout [Float], activeChannels: Int, pitchFactor: Float) {
+        let usedChannels = min(activeChannels, channelCount)
+        guard usedChannels > 0 else { return }
+
+        for channel in 0..<usedChannels {
+            channels[channel].hopInput[hopFill] = samples[channel]
+        }
+        hopFill += 1
+
+        if outputReadIndex < hopSize {
+            for channel in 0..<usedChannels {
+                samples[channel] = channels[channel].outputQueue[outputReadIndex]
+            }
+            outputReadIndex += 1
+        } else {
+            for channel in 0..<usedChannels {
+                samples[channel] = 0
+            }
+        }
+
+        if hopFill >= hopSize {
+            processHop(pitchFactor: pitchFactor, usedChannels: usedChannels)
+            hopFill = 0
+            outputReadIndex = 0
+            timeCursor += hopSize
         }
     }
 
-    private func wrappedPhase(_ value: Float) -> Float {
-        let period = Float(windowSize)
-        guard period > 0 else { return 0 }
-        var wrapped = value
-        while wrapped < 0 {
-            wrapped += period
+    private func processHop(pitchFactor: Float, usedChannels: Int) {
+        for channel in 0..<usedChannels {
+            channels[channel].inputBuffer.copyWithin(0..<(blockSize - hopSize), from: hopSize..<blockSize)
+            channels[channel].inputBuffer.replaceSubrange((blockSize - hopSize)..<blockSize, with: channels[channel].hopInput)
+
+            var windowedInput = channels[channel].inputBuffer
+            applyWindow(&windowedInput)
+
+            var spectrumReal = windowedInput
+            var spectrumImag = Array(repeating: Float(0), count: blockSize)
+            performFFT(real: &spectrumReal, imag: &spectrumImag, direction: FFTDirection(FFT_FORWARD))
+
+            var shiftedReal = Array(repeating: Float(0), count: blockSize)
+            var shiftedImag = Array(repeating: Float(0), count: blockSize)
+            shiftSpectrum(real: spectrumReal, imag: spectrumImag, intoReal: &shiftedReal, intoImag: &shiftedImag, pitchFactor: pitchFactor)
+            completeSpectrum(real: &shiftedReal, imag: &shiftedImag)
+
+            performFFT(real: &shiftedReal, imag: &shiftedImag, direction: FFTDirection(FFT_INVERSE))
+            var timeDomain = shiftedReal.map { $0 / Float(blockSize) }
+            applyWindow(&timeDomain)
+
+            for index in 0..<blockSize {
+                channels[channel].outputBuffer[index] += timeDomain[index] / overlapCount
+            }
+            channels[channel].outputQueue = Array(channels[channel].outputBuffer[0..<hopSize])
+            channels[channel].outputBuffer.copyWithin(0..<(blockSize - hopSize), from: hopSize..<blockSize)
+            channels[channel].outputBuffer.replaceSubrange((blockSize - hopSize)..<blockSize, with: repeatElement(Float(0), count: hopSize))
         }
-        while wrapped >= period {
-            wrapped -= period
-        }
-        return wrapped
     }
 
-    private func triangle(_ normalized: Float) -> Float {
-        let clamped = max(0, min(1, normalized))
-        return 1 - abs(clamped * 2 - 1)
+    private func shiftSpectrum(real: [Float], imag: [Float], intoReal shiftedReal: inout [Float], intoImag shiftedImag: inout [Float], pitchFactor: Float) {
+        let halfCount = blockSize / 2
+        guard halfCount > 2 else { return }
+
+        let magnitudes = computeMagnitudes(real: real, imag: imag, count: halfCount + 1)
+        let peaks = findPeaks(in: magnitudes)
+
+        for (peakIndex, currentPeak) in peaks.enumerated() {
+            let shiftedPeak = Int(round(Float(currentPeak) * pitchFactor))
+            if shiftedPeak > halfCount { break }
+
+            let startIndex: Int
+            if peakIndex > 0 {
+                startIndex = currentPeak - Int(floor(Double(currentPeak - peaks[peakIndex - 1]) / 2.0))
+            } else {
+                startIndex = 0
+            }
+
+            let endIndex: Int
+            if peakIndex < peaks.count - 1 {
+                endIndex = currentPeak + Int(ceil(Double(peaks[peakIndex + 1] - currentPeak) / 2.0))
+            } else {
+                endIndex = halfCount + 1
+            }
+
+            for offset in (startIndex - currentPeak)..<(endIndex - currentPeak) {
+                let binIndex = currentPeak + offset
+                let shiftedIndex = shiftedPeak + offset
+                if shiftedIndex < 0 || shiftedIndex > halfCount || binIndex < 0 || binIndex > halfCount { continue }
+
+                let omegaDelta = 2 * Float.pi * Float(shiftedIndex - binIndex) / Float(blockSize)
+                let phase = omegaDelta * Float(timeCursor)
+                let phaseShiftReal = cos(phase)
+                let phaseShiftImag = sin(phase)
+                let valueReal = real[binIndex]
+                let valueImag = imag[binIndex]
+
+                let shiftedValueReal = valueReal * phaseShiftReal - valueImag * phaseShiftImag
+                let shiftedValueImag = valueReal * phaseShiftImag + valueImag * phaseShiftReal
+                shiftedReal[shiftedIndex] += shiftedValueReal
+                shiftedImag[shiftedIndex] += shiftedValueImag
+            }
+        }
     }
 
-    private func read(delay: Float) -> Float {
-        let bufferCount = buffer.count
-        guard bufferCount > 1 else { return buffer.first ?? 0 }
-
-        var readPosition = Float(writeIndex) - delay
-        let countFloat = Float(bufferCount)
-        while readPosition < 0 {
-            readPosition += countFloat
+    private func computeMagnitudes(real: [Float], imag: [Float], count: Int) -> [Float] {
+        var result = Array(repeating: Float(0), count: count)
+        for index in 0..<count {
+            result[index] = real[index] * real[index] + imag[index] * imag[index]
         }
-        while readPosition >= countFloat {
-            readPosition -= countFloat
-        }
+        return result
+    }
 
-        let index0 = Int(readPosition)
-        let index1 = (index0 + 1) % bufferCount
-        let fraction = readPosition - Float(index0)
-        return buffer[index0] * (1 - fraction) + buffer[index1] * fraction
+    private func findPeaks(in magnitudes: [Float]) -> [Int] {
+        guard magnitudes.count > 4 else { return [] }
+        var peaks: [Int] = []
+        var index = 2
+        let end = magnitudes.count - 2
+        while index < end {
+            let magnitude = magnitudes[index]
+            if magnitudes[index - 1] >= magnitude || magnitudes[index - 2] >= magnitude {
+                index += 1
+                continue
+            }
+            if magnitudes[index + 1] >= magnitude || magnitudes[index + 2] >= magnitude {
+                index += 1
+                continue
+            }
+            peaks.append(index)
+            index += 2
+        }
+        return peaks
+    }
+
+    private func completeSpectrum(real: inout [Float], imag: inout [Float]) {
+        let half = blockSize / 2
+        guard half > 1 else { return }
+        for index in 1..<half {
+            real[blockSize - index] = real[index]
+            imag[blockSize - index] = -imag[index]
+        }
+    }
+
+    private func applyWindow(_ values: inout [Float]) {
+        for index in 0..<min(values.count, hannWindow.count) {
+            values[index] *= hannWindow[index]
+        }
+    }
+
+    private func performFFT(real: inout [Float], imag: inout [Float], direction: FFTDirection) {
+        real.withUnsafeMutableBufferPointer { realPointer in
+            imag.withUnsafeMutableBufferPointer { imagPointer in
+                var splitComplex = DSPSplitComplex(realp: realPointer.baseAddress!, imagp: imagPointer.baseAddress!)
+                vDSP_fft_zip(fftSetup, &splitComplex, 1, log2n, direction)
+            }
+        }
+    }
+
+    private static func makeHannWindow(length: Int) -> [Float] {
+        guard length > 0 else { return [] }
+        return (0..<length).map { index in
+            Float(0.8 * (1 - cos(2 * Double.pi * Double(index) / Double(length))))
+        }
     }
 }
 
@@ -177,7 +312,7 @@ final class LXEqualizerAudioMixController {
     private var coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
     private var eqStates: [[LXBiquadState]] = []
     private var convolutionEngine: LXConvolutionEngine?
-    private var pitchStates: [LXPitchShifterState] = []
+    private var pitchEngine: LXPhaseVocoderPitchShifter?
     private var sampleRate: Double = 0
     private var channelsPerFrame = 0
     private var bitsPerChannel: UInt32 = 0
@@ -295,7 +430,7 @@ final class LXEqualizerAudioMixController {
         processedSamples = 0
         eqStates.removeAll(keepingCapacity: false)
         convolutionEngine = nil
-        pitchStates.removeAll(keepingCapacity: false)
+        pitchEngine = nil
         coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
     }
 
@@ -316,8 +451,7 @@ final class LXEqualizerAudioMixController {
             )
             : nil
 
-        let pitchWindow = Self.pitchWindowSize(sampleRate: sampleRate)
-        pitchStates = Array(repeating: LXPitchShifterState(windowSize: pitchWindow), count: channelsPerFrame)
+        pitchEngine = config.hasPitchShift ? LXPhaseVocoderPitchShifter(channelCount: channelsPerFrame) : nil
         if resetTime {
             processedSamples = 0
         }
@@ -474,10 +608,11 @@ final class LXEqualizerAudioMixController {
         guard activeChannels > 0 else { return }
 
         for channel in 0..<activeChannels {
-            var output = processEqualizer(samples[channel], channel: channel)
-            output = processPitch(output, channel: channel)
+            let output = processEqualizer(samples[channel], channel: channel)
             samples[channel] = max(min(output, 1), -1)
         }
+
+        processPitch(&samples, activeChannels: activeChannels)
 
         processConvolution(&samples, activeChannels: activeChannels)
 
@@ -503,12 +638,9 @@ final class LXEqualizerAudioMixController {
         return output
     }
 
-    private func processPitch(_ sample: Float, channel: Int) -> Float {
-        guard config.hasPitchShift, channel < pitchStates.count else { return sample }
-        var state = pitchStates[channel]
-        let output = state.process(sample, factor: config.pitchPlaybackRate)
-        pitchStates[channel] = state
-        return output
+    private func processPitch(_ samples: inout [Float], activeChannels: Int) {
+        guard let engine = pitchEngine else { return }
+        engine.processFrame(&samples, activeChannels: activeChannels, pitchFactor: config.pitchPlaybackRate)
     }
 
     private func processConvolution(_ samples: inout [Float], activeChannels: Int) {
@@ -542,11 +674,6 @@ final class LXEqualizerAudioMixController {
             normalized[index] = index < gains.count ? gains[index] : 0
         }
         return normalized
-    }
-
-    private static func pitchWindowSize(sampleRate: Double) -> Int {
-        let target = max(Int(sampleRate * 0.03), 1024)
-        return min(target, 4096)
     }
 
     private static func makeCoefficients(sampleRate: Double, gains: [Float]) -> [LXBiquadCoefficients] {
