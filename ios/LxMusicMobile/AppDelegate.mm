@@ -2216,8 +2216,12 @@ RCT_EXPORT_MODULE();
     [self.engine attachNode:self.soundEffectMixerNode];
     [self.engine connect:self.playerNode to:self.equalizerNode format:self.outputFormat];
     [self.engine connect:self.equalizerNode to:self.timePitchNode format:self.outputFormat];
-    [self.engine connect:self.timePitchNode to:self.dryMixerNode format:self.outputFormat];
-    [self.engine connect:self.timePitchNode to:self.reverbNode format:self.outputFormat];
+    AVAudioConnectionPoint *dryConnectionPoint = [[AVAudioConnectionPoint alloc] initWithNode:self.dryMixerNode bus:0];
+    AVAudioConnectionPoint *reverbConnectionPoint = [[AVAudioConnectionPoint alloc] initWithNode:self.reverbNode bus:0];
+    [self.engine connect:self.timePitchNode
+      toConnectionPoints:@[dryConnectionPoint, reverbConnectionPoint]
+                 fromBus:0
+                  format:self.outputFormat];
     [self.engine connect:self.reverbNode to:self.wetMixerNode format:self.outputFormat];
     [self.engine connect:self.dryMixerNode to:self.soundEffectMixerNode format:self.outputFormat];
     [self.engine connect:self.wetMixerNode to:self.soundEffectMixerNode format:self.outputFormat];
