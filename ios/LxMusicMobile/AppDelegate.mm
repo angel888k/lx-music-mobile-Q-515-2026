@@ -1093,6 +1093,11 @@ static LXImpulseResponseData LXLoadImpulseResponse(NSURL *url, double targetSamp
 - (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels;
 @end
 
+@interface LXStreamingPhaseVocoderPitchShifter : NSObject
+- (instancetype)initWithChannelCount:(NSUInteger)channelCount;
+- (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels pitchFactor:(float)pitchFactor;
+@end
+
 @implementation LXStreamingConvolutionEngine {
   NSUInteger _blockSize;
   NSUInteger _fftSize;
@@ -1303,6 +1308,224 @@ static LXImpulseResponseData LXLoadImpulseResponse(NSURL *url, double targetSamp
 }
 @end
 
+struct LXPhaseVocoderChannelState {
+  std::vector<float> inputBuffer;
+  std::vector<float> outputBuffer;
+  std::vector<float> hopInput;
+  std::vector<float> outputQueue;
+};
+
+@implementation LXStreamingPhaseVocoderPitchShifter {
+  NSUInteger _blockSize;
+  NSUInteger _hopSize;
+  float _overlapCount;
+  NSUInteger _channelCount;
+  FFTSetup _fftSetup;
+  vDSP_Length _log2n;
+  std::vector<float> _hannWindow;
+  std::vector<LXPhaseVocoderChannelState> _channels;
+  NSUInteger _hopFill;
+  NSUInteger _outputReadIndex;
+  NSUInteger _timeCursor;
+}
+
+- (instancetype)initWithChannelCount:(NSUInteger)channelCount {
+  self = [super init];
+  if (self == nil) return nil;
+
+  _blockSize = 4096;
+  _hopSize = 128;
+  _overlapCount = (float)(_blockSize / _hopSize);
+  _channelCount = MAX((NSUInteger)1, channelCount);
+
+  NSUInteger log2Value = (NSUInteger)llround(log2((double)_blockSize));
+  if (((NSUInteger)1 << log2Value) != _blockSize) return nil;
+  _log2n = (vDSP_Length)log2Value;
+  _fftSetup = vDSP_create_fftsetup(_log2n, FFTRadix(kFFTRadix2));
+  if (_fftSetup == NULL) return nil;
+
+  _hannWindow.resize(_blockSize);
+  for (NSUInteger index = 0; index < _blockSize; index++) {
+    _hannWindow[index] = (float)(0.8 * (1.0 - cos(2.0 * M_PI * (double)index / (double)_blockSize)));
+  }
+
+  _channels.resize(_channelCount);
+  for (NSUInteger channel = 0; channel < _channelCount; channel++) {
+    _channels[channel].inputBuffer.assign(_blockSize, 0);
+    _channels[channel].outputBuffer.assign(_blockSize, 0);
+    _channels[channel].hopInput.assign(_hopSize, 0);
+    _channels[channel].outputQueue.assign(_hopSize, 0);
+  }
+
+  _hopFill = 0;
+  _outputReadIndex = 0;
+  _timeCursor = 0;
+  return self;
+}
+
+- (void)dealloc {
+  if (_fftSetup != NULL) vDSP_destroy_fftsetup(_fftSetup);
+}
+
+- (void)applyWindow:(std::vector<float> &)values {
+  for (NSUInteger index = 0; index < MIN(values.size(), _hannWindow.size()); index++) {
+    values[index] *= _hannWindow[index];
+  }
+}
+
+- (void)performFFTWithReal:(std::vector<float> &)real imag:(std::vector<float> &)imag direction:(FFTDirection)direction {
+  DSPSplitComplex split = {
+    .realp = real.data(),
+    .imagp = imag.data(),
+  };
+  vDSP_fft_zip(_fftSetup, &split, 1, _log2n, direction);
+}
+
+- (std::vector<float>)computeMagnitudesWithReal:(const std::vector<float> &)real imag:(const std::vector<float> &)imag count:(NSUInteger)count {
+  std::vector<float> magnitudes(count, 0);
+  for (NSUInteger index = 0; index < count; index++) {
+    magnitudes[index] = real[index] * real[index] + imag[index] * imag[index];
+  }
+  return magnitudes;
+}
+
+- (std::vector<NSUInteger>)findPeaksInMagnitudes:(const std::vector<float> &)magnitudes {
+  std::vector<NSUInteger> peaks;
+  if (magnitudes.size() <= 4) return peaks;
+
+  NSUInteger index = 2;
+  NSUInteger end = (NSUInteger)magnitudes.size() - 2;
+  while (index < end) {
+    float magnitude = magnitudes[index];
+    if (magnitudes[index - 1] >= magnitude || magnitudes[index - 2] >= magnitude) {
+      index += 1;
+      continue;
+    }
+    if (magnitudes[index + 1] >= magnitude || magnitudes[index + 2] >= magnitude) {
+      index += 1;
+      continue;
+    }
+    peaks.push_back(index);
+    index += 2;
+  }
+  return peaks;
+}
+
+- (void)completeSpectrumWithReal:(std::vector<float> &)real imag:(std::vector<float> &)imag {
+  NSUInteger half = _blockSize / 2;
+  if (half <= 1) return;
+  for (NSUInteger index = 1; index < half; index++) {
+    real[_blockSize - index] = real[index];
+    imag[_blockSize - index] = -imag[index];
+  }
+}
+
+- (void)shiftSpectrumWithReal:(const std::vector<float> &)real
+                         imag:(const std::vector<float> &)imag
+                     outReal:(std::vector<float> &)shiftedReal
+                     outImag:(std::vector<float> &)shiftedImag
+                 pitchFactor:(float)pitchFactor {
+  NSUInteger halfCount = _blockSize / 2;
+  if (halfCount <= 2) return;
+
+  std::vector<float> magnitudes = [self computeMagnitudesWithReal:real imag:imag count:halfCount + 1];
+  std::vector<NSUInteger> peaks = [self findPeaksInMagnitudes:magnitudes];
+
+  for (NSUInteger peakIndex = 0; peakIndex < peaks.size(); peakIndex++) {
+    NSInteger currentPeak = (NSInteger)peaks[peakIndex];
+    NSInteger shiftedPeak = (NSInteger)llround((double)currentPeak * pitchFactor);
+    if (shiftedPeak > (NSInteger)halfCount) break;
+
+    NSInteger startIndex = peakIndex > 0
+      ? currentPeak - (NSInteger)floor((double)(currentPeak - (NSInteger)peaks[peakIndex - 1]) / 2.0)
+      : 0;
+    NSInteger endIndex = peakIndex < peaks.size() - 1
+      ? currentPeak + (NSInteger)ceil((double)((NSInteger)peaks[peakIndex + 1] - currentPeak) / 2.0)
+      : (NSInteger)halfCount + 1;
+
+    for (NSInteger offset = startIndex - currentPeak; offset < endIndex - currentPeak; offset++) {
+      NSInteger binIndex = currentPeak + offset;
+      NSInteger shiftedIndex = shiftedPeak + offset;
+      if (shiftedIndex < 0 || shiftedIndex > (NSInteger)halfCount || binIndex < 0 || binIndex > (NSInteger)halfCount) continue;
+
+      float omegaDelta = 2.0f * (float)M_PI * (float)(shiftedIndex - binIndex) / (float)_blockSize;
+      float phase = omegaDelta * (float)_timeCursor;
+      float phaseShiftReal = cosf(phase);
+      float phaseShiftImag = sinf(phase);
+      float valueReal = real[(NSUInteger)binIndex];
+      float valueImag = imag[(NSUInteger)binIndex];
+
+      float shiftedValueReal = valueReal * phaseShiftReal - valueImag * phaseShiftImag;
+      float shiftedValueImag = valueReal * phaseShiftImag + valueImag * phaseShiftReal;
+      shiftedReal[(NSUInteger)shiftedIndex] += shiftedValueReal;
+      shiftedImag[(NSUInteger)shiftedIndex] += shiftedValueImag;
+    }
+  }
+}
+
+- (void)processHopWithPitchFactor:(float)pitchFactor usedChannels:(NSUInteger)usedChannels {
+  for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+    LXPhaseVocoderChannelState &state = _channels[channel];
+    std::copy(state.inputBuffer.begin() + _hopSize, state.inputBuffer.end(), state.inputBuffer.begin());
+    std::copy(state.hopInput.begin(), state.hopInput.end(), state.inputBuffer.begin() + (_blockSize - _hopSize));
+
+    std::vector<float> windowedInput = state.inputBuffer;
+    [self applyWindow:windowedInput];
+
+    std::vector<float> spectrumReal = windowedInput;
+    std::vector<float> spectrumImag(_blockSize, 0);
+    [self performFFTWithReal:spectrumReal imag:spectrumImag direction:FFTDirection(FFT_FORWARD)];
+
+    std::vector<float> shiftedReal(_blockSize, 0);
+    std::vector<float> shiftedImag(_blockSize, 0);
+    [self shiftSpectrumWithReal:spectrumReal imag:spectrumImag outReal:shiftedReal outImag:shiftedImag pitchFactor:pitchFactor];
+    [self completeSpectrumWithReal:shiftedReal imag:shiftedImag];
+
+    [self performFFTWithReal:shiftedReal imag:shiftedImag direction:FFTDirection(FFT_INVERSE)];
+    std::vector<float> timeDomain(_blockSize, 0);
+    for (NSUInteger index = 0; index < _blockSize; index++) timeDomain[index] = shiftedReal[index] / (float)_blockSize;
+    [self applyWindow:timeDomain];
+
+    for (NSUInteger index = 0; index < _blockSize; index++) {
+      state.outputBuffer[index] += timeDomain[index] / _overlapCount;
+    }
+
+    std::copy(state.outputBuffer.begin(), state.outputBuffer.begin() + _hopSize, state.outputQueue.begin());
+    std::copy(state.outputBuffer.begin() + _hopSize, state.outputBuffer.end(), state.outputBuffer.begin());
+    std::fill(state.outputBuffer.begin() + (_blockSize - _hopSize), state.outputBuffer.end(), 0.0f);
+  }
+}
+
+- (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels pitchFactor:(float)pitchFactor {
+  NSUInteger usedChannels = MIN(activeChannels, _channelCount);
+  if (!channels || usedChannels == 0) return;
+  if (fabsf(pitchFactor - 1.0f) <= 0.001f) return;
+
+  for (NSUInteger frame = 0; frame < frameCount; frame++) {
+    for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+      _channels[channel].hopInput[_hopFill] = channels[channel][frame];
+    }
+    _hopFill += 1;
+
+    if (_outputReadIndex < _hopSize) {
+      for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+        channels[channel][frame] = _channels[channel].outputQueue[_outputReadIndex];
+      }
+      _outputReadIndex += 1;
+    } else {
+      for (NSUInteger channel = 0; channel < usedChannels; channel++) channels[channel][frame] = 0;
+    }
+
+    if (_hopFill >= _hopSize) {
+      [self processHopWithPitchFactor:pitchFactor usedChannels:usedChannels];
+      _hopFill = 0;
+      _outputReadIndex = 0;
+      _timeCursor += _hopSize;
+    }
+  }
+}
+@end
+
 static AVAudioUnitReverbPreset LXSoundEffectReverbPresetForFileName(NSString *fileName) {
   if ([fileName isEqualToString:@"filter-telephone.wav"]) return AVAudioUnitReverbPresetSmallRoom;
   if ([fileName isEqualToString:@"s2_r4_bd.wav"]) return AVAudioUnitReverbPresetCathedral;
@@ -1415,6 +1638,7 @@ RCT_REMAP_METHOD(updateEqualizerConfig, updateEqualizerConfig:(NSDictionary *)co
 @property (nonatomic, strong) AVAudioMixerNode *wetMixerNode;
 @property (nonatomic, strong) AVAudioMixerNode *soundEffectMixerNode;
 @property (nonatomic, strong) LXStreamingConvolutionEngine *convolutionEngine;
+@property (nonatomic, strong) LXStreamingPhaseVocoderPitchShifter *pitchShifterEngine;
 @property (nonatomic, strong) AVAudioFormat *outputFormat;
 @property (nonatomic, strong) dispatch_source_t pannerTimer;
 @property (nonatomic, copy) NSString *convolutionAssetKey;
@@ -1608,6 +1832,7 @@ RCT_EXPORT_MODULE();
   self.wetMixerNode = nil;
   self.soundEffectMixerNode = nil;
   self.convolutionEngine = nil;
+  self.pitchShifterEngine = nil;
   self.convolutionAssetKey = nil;
   self.pannerTimer = nil;
   self.pannerPhase = 0.0f;
@@ -1694,6 +1919,15 @@ RCT_EXPORT_MODULE();
   return YES;
 }
 
+- (void)refreshPitchShifterEngineLockedWithPitchFactor:(float)pitchFactor {
+  if (self.sampleRate <= 0 || self.channels == 0 || fabsf(pitchFactor - 1.0f) <= 0.001f) {
+    self.pitchShifterEngine = nil;
+    return;
+  }
+  if (self.pitchShifterEngine != nil) return;
+  self.pitchShifterEngine = [[LXStreamingPhaseVocoderPitchShifter alloc] initWithChannelCount:self.channels];
+}
+
 - (void)applySoundEffectConfigLocked {
   if (self.equalizerNode == nil) return;
 
@@ -1721,6 +1955,7 @@ RCT_EXPORT_MODULE();
     self.convolutionEngine = nil;
     self.convolutionAssetKey = nil;
   }
+  [self refreshPitchShifterEngineLockedWithPitchFactor:pitchPlaybackRate];
 
   self.equalizerNode.globalGain = 0.0f;
   self.equalizerNode.bypass = !enabled;
@@ -1738,7 +1973,7 @@ RCT_EXPORT_MODULE();
 
   if (self.timePitchNode != nil) {
     self.timePitchNode.rate = self.currentRate;
-    self.timePitchNode.pitch = LXSoundEffectPitchFactorToCents(pitchPlaybackRate);
+    self.timePitchNode.pitch = 0.0f;
   }
 
   if (self.reverbNode != nil) {
@@ -2041,6 +2276,9 @@ RCT_EXPORT_MODULE();
   dispatch_sync(self.renderQueue, ^{
     if (self.playerNode == nil || self.stopRequested) return;
 
+    if (self.pitchShifterEngine != nil) {
+      [self.pitchShifterEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels pitchFactor:LXSoundEffectPitchShifterPlaybackRate];
+    }
     if (self.convolutionEngine != nil) {
       [self.convolutionEngine processPCMChannels:channels frameCount:playableFrames activeChannels:self.channels];
     }
