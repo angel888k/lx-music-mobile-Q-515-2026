@@ -355,21 +355,22 @@ private final class LXDynamicsProcessor {
 
 private func withUnsafeMutableChannelPointers<R>(_ channels: inout [[Float]], _ body: (UnsafeMutablePointer<UnsafeMutablePointer<Float>>) -> R) -> R {
     var pointers = Array<UnsafeMutablePointer<Float>>(repeating: .init(bitPattern: 0x1)!, count: channels.count)
+    return channels.withUnsafeMutableBufferPointer { channelBuffers in
+        func recurse(_ index: Int) -> R {
+            if index >= channelBuffers.count {
+                return pointers.withUnsafeMutableBufferPointer { pointerBuffer in
+                    body(pointerBuffer.baseAddress!)
+                }
+            }
 
-    func recurse(_ index: Int) -> R {
-        if index >= channels.count {
-            return pointers.withUnsafeMutableBufferPointer { pointerBuffer in
-                body(pointerBuffer.baseAddress!)
+            return channelBuffers[index].withUnsafeMutableBufferPointer { buffer in
+                pointers[index] = buffer.baseAddress!
+                return recurse(index + 1)
             }
         }
 
-        return channels[index].withUnsafeMutableBufferPointer { buffer in
-            pointers[index] = buffer.baseAddress!
-            return recurse(index + 1)
-        }
+        return recurse(0)
     }
-
-    return recurse(0)
 }
 
 struct LXSoundEffectConfiguration {
