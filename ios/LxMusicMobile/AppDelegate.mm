@@ -2938,7 +2938,7 @@ RCT_EXPORT_MODULE();
     _pcmBuffer->reset(channels, bufferCapacityFrames);
     [self resetRealtimeRenderStateLocked];
     self.engine = [[AVAudioEngine alloc] init];
-    __weak typeof(self) weakSelf = self;
+    __weak StreamingFlacPlayerModule *weakSelf = self;
     self.sourceNode = [[AVAudioSourceNode alloc] initWithFormat:self.outputFormat renderBlock:^OSStatus(BOOL *isSilence, const AudioTimeStamp *timestamp, AVAudioFrameCount frameCount, AudioBufferList *outputData) {
       StreamingFlacPlayerModule *strongSelf = weakSelf;
       if (strongSelf == nil) {
