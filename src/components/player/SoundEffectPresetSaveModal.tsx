@@ -78,7 +78,7 @@ export default forwardRef<SoundEffectPresetSaveModalType, {}>((props, ref) => {
   }))
 
   const handleConfirm = async() => {
-    const name = inputRef.current?.getText() ?? ''
+    const name = (inputRef.current?.getText() ?? '').slice(0, 20)
     if (!name) {
       toast(t('input_error'))
       return

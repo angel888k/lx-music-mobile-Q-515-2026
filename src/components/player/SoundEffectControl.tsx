@@ -7,7 +7,7 @@ import Slider from '@/components/common/Slider'
 import { updateSetting } from '@/core/common'
 import { useI18n } from '@/lang'
 import SoundEffectPresetSaveModal, { type SoundEffectPresetSaveModalType } from './SoundEffectPresetSaveModal'
-import { createStyle, confirmDialog } from '@/utils/tools'
+import { createStyle, confirmDialog, tipDialog, toast } from '@/utils/tools'
 import { useTheme } from '@/store/theme/hook'
 import { useSetting } from '@/store/setting/hook'
 import {
@@ -26,19 +26,19 @@ import {
 import {
   getUserConvolutionPresetList,
   getUserEQPresetList,
-  getUserPitchShifterPresetList,
   removeUserConvolutionPreset,
   removeUserEQPreset,
-  removeUserPitchShifterPreset,
   saveUserConvolutionPreset,
   saveUserEQPreset,
-  saveUserPitchShifterPreset,
 } from '@/store/soundEffect'
 
 const minGain = -15
 const maxGain = 15
 const minPitchPlaybackRate = 0.5
 const maxPitchPlaybackRate = 1.5
+const defaultSurroundSpeed = 25
+const defaultSurroundDistance = 5
+const maxUserPresetCount = 31
 
 type PreviewGains = Record<typeof equalizerFrequencies[number], number>
 type LayoutMode = 'split' | 'stacked'
@@ -52,17 +52,21 @@ const PlaceholderCheckbox = memo(({
   checked,
   label,
   onPress,
+  checkedIconName = 'checkbox-marked',
+  uncheckedIconName = 'checkbox-blank-outline',
 }: {
   checked: boolean
   label: string
   onPress: () => void
+  checkedIconName?: string
+  uncheckedIconName?: string
 }) => {
   const theme = useTheme()
 
   return (
     <TouchableOpacity style={styles.placeholderCheckbox} activeOpacity={0.7} onPress={onPress}>
       <Icon
-        name={checked ? 'checkbox-marked' : 'checkbox-blank-outline'}
+        name={checked ? checkedIconName : uncheckedIconName}
         size={15}
         color={checked ? theme['c-primary-font-active'] : theme['c-font-label']}
       />
@@ -80,6 +84,7 @@ const PlaceholderSliderRow = memo(({
   onValueChange,
   onSlidingComplete,
   formatter,
+  valueColor,
 }: {
   label: string
   value: number
@@ -89,6 +94,7 @@ const PlaceholderSliderRow = memo(({
   onValueChange: (value: number) => void
   onSlidingComplete?: (value: number) => void
   formatter: (value: number) => string
+  valueColor?: string
 }) => {
   const theme = useTheme()
 
@@ -106,9 +112,35 @@ const PlaceholderSliderRow = memo(({
             onSlidingComplete={onSlidingComplete}
           />
         </View>
-        <Text size={12} color={theme['c-font-label']} style={styles.placeholderValue}>{formatter(value)}</Text>
+        <Text size={12} color={valueColor ?? theme['c-font-label']} style={styles.placeholderValue}>{formatter(value)}</Text>
       </View>
     </View>
+  )
+})
+
+const PresetAddButton = memo(({
+  onPress,
+  disabled = false,
+}: {
+  onPress: () => void
+  disabled?: boolean
+}) => {
+  const theme = useTheme()
+
+  return (
+    <TouchableOpacity
+      activeOpacity={disabled ? 1 : 0.7}
+      onPress={() => {
+        if (disabled) return
+        onPress()
+      }}
+      style={{
+        ...styles.presetAddButton,
+        borderColor: theme['c-primary-font-active'],
+        opacity: disabled ? 0.35 : 0.7,
+      }}>
+      <Text size={15} color={theme['c-primary-font-active']} style={styles.presetAddText}>+</Text>
+    </TouchableOpacity>
   )
 })
 
@@ -120,6 +152,7 @@ const EqualizerSection = memo(({
   onReset,
   onPresetPress,
   onSavePreset,
+  saveDisabled,
   onUserPresetPress,
   onUserPresetLongPress,
   onValueChange,
@@ -133,6 +166,7 @@ const EqualizerSection = memo(({
   onReset: () => void
   onPresetPress: (presetId: Exclude<LX.SoundEffectPresetId, 'custom'>) => void
   onSavePreset: () => void
+  saveDisabled: boolean
   onUserPresetPress: (preset: LX.SoundEffect.EQPreset) => void
   onUserPresetLongPress: (preset: LX.SoundEffect.EQPreset) => void
   onValueChange: (frequency: typeof equalizerFrequencies[number], value: number) => void
@@ -156,9 +190,6 @@ const EqualizerSection = memo(({
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_equalizer')}</Text>
         <View style={styles.headerActions}>
-          <TouchableOpacity activeOpacity={0.7} onPress={onSavePreset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
-            <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_save')}</Text>
-          </TouchableOpacity>
           <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
             <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
           </TouchableOpacity>
@@ -259,6 +290,7 @@ const EqualizerSection = memo(({
             </TouchableOpacity>
           )
         })}
+        <PresetAddButton onPress={onSavePreset} disabled={saveDisabled} />
       </View>
     </View>
   )
@@ -274,6 +306,7 @@ const EnvironmentSection = memo(({
   onMainGainChange,
   onSendGainChange,
   onSavePreset,
+  saveDisabled,
   onUserPresetPress,
   onUserPresetLongPress,
 }: {
@@ -286,6 +319,7 @@ const EnvironmentSection = memo(({
   onMainGainChange: (value: number) => void
   onSendGainChange: (value: number) => void
   onSavePreset: () => void
+  saveDisabled: boolean
   onUserPresetPress: (preset: LX.SoundEffect.ConvolutionPreset) => void
   onUserPresetLongPress: (preset: LX.SoundEffect.ConvolutionPreset) => void
 }) => {
@@ -297,17 +331,23 @@ const EnvironmentSection = memo(({
     <View style={styles.section}>
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_environment')}</Text>
-        <TouchableOpacity activeOpacity={0.7} onPress={onSavePreset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
-          <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_save')}</Text>
-        </TouchableOpacity>
       </View>
       <View style={styles.envList}>
+        <PlaceholderCheckbox
+          checked={!selectedSource}
+          label={t('setting_play_sound_effect_preset_none')}
+          onPress={() => { onToggleConvolution('') }}
+          checkedIconName="radiobox-marked"
+          uncheckedIconName="radiobox-blank"
+        />
         {soundEffectConvolutionOptions.map(item => (
           <PlaceholderCheckbox
             key={item.id}
             checked={selectedSource == item.source}
             label={t(item.labelKey)}
             onPress={() => { onToggleConvolution(item.source) }}
+            checkedIconName="radiobox-marked"
+            uncheckedIconName="radiobox-blank"
           />
         ))}
       </View>
@@ -358,6 +398,7 @@ const EnvironmentSection = memo(({
             </TouchableOpacity>
           )
         })}
+        <PresetAddButton onPress={onSavePreset} disabled={disabledConvolution || saveDisabled} />
       </View>
     </View>
   )
@@ -365,22 +406,14 @@ const EnvironmentSection = memo(({
 
 const PitchSection = memo(({
   playbackRate,
-  userPresetList,
-  activeUserPresetId,
   onReset,
   onValueChange,
-  onSavePreset,
-  onUserPresetPress,
-  onUserPresetLongPress,
+  onShowTip,
 }: {
   playbackRate: number
-  userPresetList: LX.SoundEffect.PitchShifterPreset[]
-  activeUserPresetId: string | null
   onReset: () => void
   onValueChange: (value: number) => void
-  onSavePreset: () => void
-  onUserPresetPress: (preset: LX.SoundEffect.PitchShifterPreset) => void
-  onUserPresetLongPress: (preset: LX.SoundEffect.PitchShifterPreset) => void
+  onShowTip: () => void
 }) => {
   const t = useI18n()
   const theme = useTheme()
@@ -390,12 +423,11 @@ const PitchSection = memo(({
       <View style={styles.sectionHeader}>
         <View style={styles.sectionHeaderTitle}>
           <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_pitch')}</Text>
-          <Icon name="help" size={14} color={theme['c-font-label']} />
+          <TouchableOpacity activeOpacity={0.7} onPress={onShowTip} style={styles.tipButton}>
+            <Icon name="help" size={14} color={theme['c-font-label']} />
+          </TouchableOpacity>
         </View>
         <View style={styles.headerActions}>
-          <TouchableOpacity activeOpacity={0.7} onPress={onSavePreset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
-            <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_save')}</Text>
-          </TouchableOpacity>
           <TouchableOpacity activeOpacity={0.7} onPress={onReset} style={{ ...styles.resetButton, backgroundColor: theme['c-button-background'] }}>
             <Text size={12} color={theme['c-button-font']}>{t('setting_play_sound_effect_reset')}</Text>
           </TouchableOpacity>
@@ -410,26 +442,6 @@ const PitchSection = memo(({
         onValueChange={value => { onValueChange(Number(value)) }}
         formatter={formatPlaybackRate}
       />
-      <View style={styles.presetList}>
-        {userPresetList.map(preset => {
-          const isActive = preset.id == activeUserPresetId
-          return (
-            <TouchableOpacity
-              key={preset.id}
-              activeOpacity={0.7}
-              style={{
-                ...styles.presetButton,
-                backgroundColor: isActive ? theme['c-button-background-selected'] : theme['c-button-background'],
-              }}
-              onPress={() => { onUserPresetPress(preset) }}
-              onLongPress={() => { onUserPresetLongPress(preset) }}>
-              <Text size={13} color={isActive ? theme['c-button-font-selected'] : theme['c-button-font']}>
-                {preset.name}
-              </Text>
-            </TouchableOpacity>
-          )
-        })}
-      </View>
     </View>
   )
 })
@@ -450,6 +462,7 @@ const SurroundSection = memo(({
   onDistanceChange: (value: number) => void
 }) => {
   const t = useI18n()
+  const theme = useTheme()
 
   return (
     <View style={styles.section}>
@@ -461,7 +474,7 @@ const SurroundSection = memo(({
           onPress={onToggle}
         />
       </View>
-      <View style={{ opacity: enabled ? 1 : 0.45 }}>
+      <View>
         <PlaceholderSliderRow
           label={t('setting_play_sound_effect_surround_speed')}
           value={speed}
@@ -470,6 +483,7 @@ const SurroundSection = memo(({
           step={1}
           onValueChange={value => { onSpeedChange(Number(value)) }}
           formatter={formatPlain}
+          valueColor={speed != defaultSurroundSpeed ? theme['c-primary-font-active'] : undefined}
         />
         <PlaceholderSliderRow
           label={t('setting_play_sound_effect_surround_distance')}
@@ -479,6 +493,7 @@ const SurroundSection = memo(({
           step={1}
           onValueChange={value => { onDistanceChange(Number(value)) }}
           formatter={formatPlain}
+          valueColor={distance != defaultSurroundDistance ? theme['c-primary-font-active'] : undefined}
         />
       </View>
     </View>
@@ -497,7 +512,6 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
   const [previewGains, setPreviewGains] = useState<PreviewGains>(() => getEqualizerGains(setting))
   const [userEqPresetList, setUserEqPresetList] = useState<LX.SoundEffect.EQPreset[]>([])
   const [userConvolutionPresetList, setUserConvolutionPresetList] = useState<LX.SoundEffect.ConvolutionPreset[]>([])
-  const [userPitchPresetList, setUserPitchPresetList] = useState<LX.SoundEffect.PitchShifterPreset[]>([])
   const presetId = normalizeEqualizerPresetId(setting['player.soundEffect.preset'])
   const convolutionSource = setting['player.soundEffect.convolution.fileName']
   const convolutionMainGain = setting['player.soundEffect.convolution.mainGain']
@@ -514,9 +528,8 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
     preset.mainGain == convolutionMainGain &&
     preset.sendGain == convolutionSendGain,
   )?.id ?? null, [convolutionMainGain, convolutionSendGain, convolutionSource, userConvolutionPresetList])
-  const activePitchUserPresetId = useMemo(() => userPitchPresetList.find(preset =>
-    Math.abs(preset.playbackRate - pitchPlaybackRate) < 0.001,
-  )?.id ?? null, [pitchPlaybackRate, userPitchPresetList])
+  const isEqPresetLimitReached = userEqPresetList.length >= maxUserPresetCount
+  const isConvolutionPresetLimitReached = userConvolutionPresetList.length >= maxUserPresetCount
 
   useEffect(() => {
     setPreviewGains(getEqualizerGains(setting))
@@ -525,15 +538,13 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
   useEffect(() => {
     let cancelled = false
     const loadPresetLists = async() => {
-      const [eqList, convolutionList, pitchList] = await Promise.all([
+      const [eqList, convolutionList] = await Promise.all([
         getUserEQPresetList(),
         getUserConvolutionPresetList(),
-        getUserPitchShifterPresetList(),
       ])
       if (cancelled) return
       setUserEqPresetList(eqList)
       setUserConvolutionPresetList(convolutionList)
-      setUserPitchPresetList(pitchList)
     }
     void loadPresetLists()
     return () => {
@@ -589,11 +600,22 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
     updateSetting({ 'player.soundEffect.pitchShifter.playbackRate': 1 })
   }
 
+  const handleShowPitchTip = () => {
+    void tipDialog({
+      title: t('setting_play_sound_effect_pitch'),
+      message: t('setting_play_sound_effect_pitch_tip'),
+    })
+  }
+
   const handleUpdatePitch = (value: number) => {
     updateSetting({ 'player.soundEffect.pitchShifter.playbackRate': value })
   }
 
   const handleShowSaveEqPreset = () => {
+    if (isEqPresetLimitReached) {
+      toast(t('setting_play_sound_effect_preset_limit', { num: maxUserPresetCount }))
+      return
+    }
     savePresetModalRef.current?.show({
       title: t('setting_play_sound_effect_save_eq_title'),
       onSave: async(name) => {
@@ -642,6 +664,10 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
   }
 
   const handleShowSaveConvolutionPreset = () => {
+    if (isConvolutionPresetLimitReached) {
+      toast(t('setting_play_sound_effect_preset_limit', { num: maxUserPresetCount }))
+      return
+    }
     savePresetModalRef.current?.show({
       title: t('setting_play_sound_effect_save_env_title'),
       onSave: async(name) => {
@@ -674,32 +700,6 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
     setUserConvolutionPresetList(await removeUserConvolutionPreset(preset.id))
   }
 
-  const handleShowSavePitchPreset = () => {
-    savePresetModalRef.current?.show({
-      title: t('setting_play_sound_effect_save_pitch_title'),
-      onSave: async(name) => {
-        const nextList = await saveUserPitchShifterPreset({
-          name,
-          playbackRate: pitchPlaybackRate,
-        })
-        setUserPitchPresetList(nextList)
-      },
-    })
-  }
-
-  const handleApplyPitchPreset = (preset: LX.SoundEffect.PitchShifterPreset) => {
-    updateSetting({ 'player.soundEffect.pitchShifter.playbackRate': preset.playbackRate })
-  }
-
-  const handleRemovePitchPreset = async(preset: LX.SoundEffect.PitchShifterPreset) => {
-    const confirm = await confirmDialog({
-      title: t('setting_play_sound_effect_remove_preset_title'),
-      message: t('setting_play_sound_effect_remove_preset_message', { name: preset.name }),
-    })
-    if (!confirm) return
-    setUserPitchPresetList(await removeUserPitchShifterPreset(preset.id))
-  }
-
   const handleToggleSurround = () => {
     updateSetting({ 'player.soundEffect.panner.enable': !surroundEnabled })
   }
@@ -726,6 +726,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
             onMainGainChange={handleUpdateConvolutionMainGain}
             onSendGainChange={handleUpdateConvolutionSendGain}
             onSavePreset={handleShowSaveConvolutionPreset}
+            saveDisabled={isConvolutionPresetLimitReached}
             onUserPresetPress={handleApplyConvolutionPreset}
             onUserPresetLongPress={preset => { void handleRemoveConvolutionPreset(preset) }}
           />
@@ -739,6 +740,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
             onReset={handleReset}
             onPresetPress={handlePresetPress}
             onSavePreset={handleShowSaveEqPreset}
+            saveDisabled={isEqPresetLimitReached}
             onUserPresetPress={handleApplyEqPreset}
             onUserPresetLongPress={preset => { void handleRemoveEqPreset(preset) }}
             onValueChange={handleValueChange}
@@ -749,13 +751,9 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
           <PitchSection
             playbackRate={pitchPlaybackRate}
-            userPresetList={userPitchPresetList}
-            activeUserPresetId={activePitchUserPresetId}
             onReset={handleResetPitch}
             onValueChange={handleUpdatePitch}
-            onSavePreset={handleShowSavePitchPreset}
-            onUserPresetPress={handleApplyPitchPreset}
-            onUserPresetLongPress={preset => { void handleRemovePitchPreset(preset) }}
+            onShowTip={handleShowPitchTip}
           />
         </View>
         <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
@@ -793,6 +791,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
               onMainGainChange={handleUpdateConvolutionMainGain}
               onSendGainChange={handleUpdateConvolutionSendGain}
               onSavePreset={handleShowSaveConvolutionPreset}
+              saveDisabled={isConvolutionPresetLimitReached}
               onUserPresetPress={handleApplyConvolutionPreset}
               onUserPresetLongPress={preset => { void handleRemoveConvolutionPreset(preset) }}
             />
@@ -800,13 +799,9 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
           <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
             <PitchSection
               playbackRate={pitchPlaybackRate}
-              userPresetList={userPitchPresetList}
-              activeUserPresetId={activePitchUserPresetId}
               onReset={handleResetPitch}
               onValueChange={handleUpdatePitch}
-              onSavePreset={handleShowSavePitchPreset}
-              onUserPresetPress={handleApplyPitchPreset}
-              onUserPresetLongPress={preset => { void handleRemovePitchPreset(preset) }}
+              onShowTip={handleShowPitchTip}
             />
           </View>
           <View style={{ ...styles.sectionBlock, ...styles.sectionBlockWithDivider, borderTopColor: dividerColor }}>
@@ -838,6 +833,7 @@ export default memo(({ showTip = true, layoutMode = 'split' }: {
               onReset={handleReset}
               onPresetPress={handlePresetPress}
               onSavePreset={handleShowSaveEqPreset}
+              saveDisabled={isEqPresetLimitReached}
               onUserPresetPress={handleApplyEqPreset}
               onUserPresetLongPress={preset => { void handleRemoveEqPreset(preset) }}
               onValueChange={handleValueChange}
@@ -909,6 +905,9 @@ const styles = createStyle({
   headerActions: {
     flexDirection: 'row',
     gap: 8,
+  },
+  tipButton: {
+    padding: 2,
   },
   resetButton: {
     paddingHorizontal: 10,
@@ -983,6 +982,22 @@ const styles = createStyle({
     borderRadius: 4,
     marginRight: 8,
     marginBottom: 8,
+  },
+  presetAddButton: {
+    minWidth: 28,
+    height: 26,
+    paddingHorizontal: 8,
+    marginRight: 8,
+    marginBottom: 8,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  presetAddText: {
+    lineHeight: 16,
+    fontWeight: '600',
   },
   sliderWrap: {
     flex: 1,

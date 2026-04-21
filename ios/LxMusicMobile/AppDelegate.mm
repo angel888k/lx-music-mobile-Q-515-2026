@@ -936,11 +936,6 @@ static float LXSoundEffectClampFloatValue(id value, float defaultValue, float mi
   return result;
 }
 
-static float LXSoundEffectPitchFactorToCents(float pitchFactor) {
-  if (pitchFactor <= 0.0f) return 0.0f;
-  return 1200.0f * log2f(pitchFactor);
-}
-
 static uint16_t LXReadLE16(const uint8_t *bytes) {
   return (uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8);
 }
@@ -1501,7 +1496,7 @@ public:
     if (!_isReady) return;
     NSUInteger usedChannels = MIN(activeChannels, _channelCount);
     if (!channels || usedChannels == 0) return;
-    if (fabsf(pitchFactor - 1.0f) <= 0.001f) return;
+    if (fabsf(pitchFactor - 1.0f) < 0.01f) return;
 
     for (NSUInteger frame = 0; frame < frameCount; frame++) {
       for (NSUInteger channel = 0; channel < usedChannels; channel++) {
@@ -1664,6 +1659,102 @@ private:
   NSUInteger _hopFill = 0;
   NSUInteger _outputReadIndex = 0;
   NSUInteger _timeCursor = 0;
+  bool _isReady = false;
+};
+
+struct LXBiquadCoefficients {
+  float b0 = 1.0f;
+  float b1 = 0.0f;
+  float b2 = 0.0f;
+  float a1 = 0.0f;
+  float a2 = 0.0f;
+
+  bool isBypass() const {
+    return b0 == 1.0f && b1 == 0.0f && b2 == 0.0f && a1 == 0.0f && a2 == 0.0f;
+  }
+};
+
+struct LXBiquadState {
+  float z1 = 0.0f;
+  float z2 = 0.0f;
+};
+
+class LXRealtimeEqualizerProcessor {
+public:
+  LXRealtimeEqualizerProcessor(double sampleRate, NSUInteger channelCount, const std::vector<float> &gains) {
+    _sampleRate = sampleRate;
+    _channelCount = std::max((NSUInteger)1, channelCount);
+    _coefficients = makeCoefficients(sampleRate, gains);
+    _states.assign(_channelCount, std::vector<LXBiquadState>(_coefficients.size()));
+    _isReady = !_coefficients.empty();
+  }
+
+  bool isReady() const {
+    return _isReady;
+  }
+
+  void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels) {
+    if (!_isReady || channels == NULL) return;
+    NSUInteger usedChannels = MIN(activeChannels, _channelCount);
+    if (usedChannels == 0) return;
+
+    for (NSUInteger frame = 0; frame < frameCount; frame++) {
+      for (NSUInteger channel = 0; channel < usedChannels; channel++) {
+        float output = channels[channel][frame];
+        for (NSUInteger bandIndex = 0; bandIndex < _coefficients.size(); bandIndex++) {
+          const LXBiquadCoefficients &coeff = _coefficients[bandIndex];
+          if (coeff.isBypass()) continue;
+
+          LXBiquadState &state = _states[channel][bandIndex];
+          float filtered = coeff.b0 * output + state.z1;
+          state.z1 = coeff.b1 * output - coeff.a1 * filtered + state.z2;
+          state.z2 = coeff.b2 * output - coeff.a2 * filtered;
+          output = filtered;
+        }
+        channels[channel][frame] = fmaxf(fminf(output, 1.0f), -1.0f);
+      }
+    }
+  }
+
+private:
+  static std::vector<LXBiquadCoefficients> makeCoefficients(double sampleRate, const std::vector<float> &gains) {
+    static const std::vector<float> frequencies = { 31.0f, 62.0f, 125.0f, 250.0f, 500.0f, 1000.0f, 2000.0f, 4000.0f, 8000.0f, 16000.0f };
+    std::vector<LXBiquadCoefficients> coefficients(frequencies.size());
+    if (sampleRate <= 0) return coefficients;
+
+    const float q = 1.41f;
+    for (NSUInteger index = 0; index < frequencies.size(); index++) {
+      float gain = index < gains.size() ? gains[index] : 0.0f;
+      if (fabsf(gain) < 0.01f) continue;
+
+      float amplitude = powf(10.0f, gain / 40.0f);
+      float omega = 2.0f * (float)M_PI * frequencies[index] / (float)sampleRate;
+      float cosOmega = cosf(omega);
+      float sinOmega = sinf(omega);
+      float alpha = sinOmega / (2.0f * q);
+
+      float b0 = 1.0f + alpha * amplitude;
+      float b1 = -2.0f * cosOmega;
+      float b2 = 1.0f - alpha * amplitude;
+      float a0 = 1.0f + alpha / amplitude;
+      float a1 = -2.0f * cosOmega;
+      float a2 = 1.0f - alpha / amplitude;
+
+      LXBiquadCoefficients coeff;
+      coeff.b0 = b0 / a0;
+      coeff.b1 = b1 / a0;
+      coeff.b2 = b2 / a0;
+      coeff.a1 = a1 / a0;
+      coeff.a2 = a2 / a0;
+      coefficients[index] = coeff;
+    }
+    return coefficients;
+  }
+
+  double _sampleRate = 0;
+  NSUInteger _channelCount = 0;
+  std::vector<LXBiquadCoefficients> _coefficients;
+  std::vector<std::vector<LXBiquadState>> _states;
   bool _isReady = false;
 };
 
@@ -2169,7 +2260,7 @@ struct LXPhaseVocoderChannelState {
 - (void)processPCMChannels:(float *const *)channels frameCount:(NSUInteger)frameCount activeChannels:(NSUInteger)activeChannels pitchFactor:(float)pitchFactor {
   NSUInteger usedChannels = MIN(activeChannels, _channelCount);
   if (!channels || usedChannels == 0) return;
-  if (fabsf(pitchFactor - 1.0f) <= 0.001f) return;
+  if (fabsf(pitchFactor - 1.0f) < 0.01f) return;
 
   for (NSUInteger frame = 0; frame < frameCount; frame++) {
     for (NSUInteger channel = 0; channel < usedChannels; channel++) {
@@ -2302,7 +2393,6 @@ RCT_REMAP_METHOD(updateEqualizerConfig, updateEqualizerConfig:(NSDictionary *)co
 @property (nonatomic, strong) AVAudioEngine *engine;
 @property (nonatomic, strong) AVAudioSourceNode *sourceNode;
 @property (nonatomic, strong) AVAudioUnitTimePitch *timePitchNode;
-@property (nonatomic, strong) AVAudioUnitEQ *equalizerNode;
 @property (nonatomic, strong) AVAudioUnitReverb *reverbNode;
 @property (nonatomic, strong) AVAudioMixerNode *dryMixerNode;
 @property (nonatomic, strong) AVAudioMixerNode *wetMixerNode;
@@ -2365,9 +2455,12 @@ static NSString *LXStreamingFlacDecoderErrorStatusName(FLAC__StreamDecoderErrorS
   std::atomic<bool> _endedNotificationScheduled;
   std::atomic<int64_t> _renderPlaybackGeneration;
   std::atomic<float> _pitchPlaybackRate;
+  std::shared_ptr<LXRealtimeEqualizerProcessor> _realtimeEqualizerProcessor;
   std::shared_ptr<LXRealtimeConvolutionProcessor> _realtimeConvolutionProcessor;
   std::shared_ptr<LXRealtimePhaseVocoderPitchShifter> _realtimePitchProcessor;
   std::shared_ptr<LXRealtimeSpatialPannerProcessor> _realtimePannerProcessor;
+  BOOL _lastRealtimeEqualizerEnabled;
+  std::vector<float> _lastRealtimeEqualizerGains;
 }
 
 RCT_EXPORT_MODULE();
@@ -2387,6 +2480,7 @@ RCT_EXPORT_MODULE();
     _endedNotificationScheduled.store(false, std::memory_order_release);
     _renderPlaybackGeneration.store(0, std::memory_order_release);
     _pitchPlaybackRate.store(1.0f, std::memory_order_release);
+    _lastRealtimeEqualizerEnabled = NO;
     _streamCondition = [[NSCondition alloc] init];
     _decoderQueue = dispatch_queue_create("cn.toside.music.mobile.streamingflac.decoder", DISPATCH_QUEUE_SERIAL);
     _renderQueue = dispatch_queue_create("cn.toside.music.mobile.streamingflac.render", DISPATCH_QUEUE_SERIAL);
@@ -2510,9 +2604,12 @@ RCT_EXPORT_MODULE();
 }
 
 - (void)rebuildRealtimeProcessorsLocked {
+  std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePannerProcessor, std::shared_ptr<LXRealtimeSpatialPannerProcessor>(), std::memory_order_release);
+  _lastRealtimeEqualizerEnabled = NO;
+  _lastRealtimeEqualizerGains.clear();
   self.convolutionAssetKey = nil;
   [self applySoundEffectConfigLocked];
 }
@@ -2580,7 +2677,6 @@ RCT_EXPORT_MODULE();
   [self resetRealtimeRenderStateLocked];
   self.outputFormat = nil;
   self.sourceNode = nil;
-  self.equalizerNode = nil;
   self.reverbNode = nil;
   self.dryMixerNode = nil;
   self.wetMixerNode = nil;
@@ -2588,9 +2684,12 @@ RCT_EXPORT_MODULE();
   self.convolutionAssetKey = nil;
   self.pannerTimer = nil;
   self.pannerPhase = 0.0f;
+  std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePannerProcessor, std::shared_ptr<LXRealtimeSpatialPannerProcessor>(), std::memory_order_release);
+  _lastRealtimeEqualizerEnabled = NO;
+  _lastRealtimeEqualizerGains.clear();
 }
 
 - (void)handleSoundEffectConfigChanged:(NSNotification *)notification {
@@ -2664,7 +2763,7 @@ RCT_EXPORT_MODULE();
 }
 
 - (void)refreshPitchShifterEngineLockedWithPitchFactor:(float)pitchFactor {
-  if (self.sampleRate <= 0 || self.channels == 0 || fabsf(pitchFactor - 1.0f) <= 0.001f) {
+  if (self.sampleRate <= 0 || self.channels == 0 || fabsf(pitchFactor - 1.0f) < 0.01f) {
     std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
     return;
   }
@@ -2675,8 +2774,53 @@ RCT_EXPORT_MODULE();
   std::atomic_store_explicit(&_realtimePitchProcessor, processor, std::memory_order_release);
 }
 
+- (void)refreshEqualizerEngineLockedWithEnabled:(BOOL)enabled gains:(const std::vector<float> &)gains {
+  if (self.sampleRate <= 0 || self.channels == 0 || !enabled) {
+    std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
+    _lastRealtimeEqualizerEnabled = NO;
+    _lastRealtimeEqualizerGains.clear();
+    return;
+  }
+
+  bool hasEnabledGain = false;
+  for (float gain : gains) {
+    if (fabsf(gain) >= 0.01f) {
+      hasEnabledGain = true;
+      break;
+    }
+  }
+  if (!hasEnabledGain) {
+    std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
+    _lastRealtimeEqualizerEnabled = NO;
+    _lastRealtimeEqualizerGains.clear();
+    return;
+  }
+
+  bool hasSameConfig = _lastRealtimeEqualizerEnabled == enabled && _lastRealtimeEqualizerGains.size() == gains.size();
+  if (hasSameConfig) {
+    for (NSUInteger index = 0; index < gains.size(); index++) {
+      if (fabsf(_lastRealtimeEqualizerGains[index] - gains[index]) >= 0.0001f) {
+        hasSameConfig = false;
+        break;
+      }
+    }
+  }
+  if (hasSameConfig) return;
+
+  std::shared_ptr<LXRealtimeEqualizerProcessor> processor = std::make_shared<LXRealtimeEqualizerProcessor>(self.sampleRate, self.channels, gains);
+  if (!processor->isReady()) {
+    std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
+    _lastRealtimeEqualizerEnabled = NO;
+    _lastRealtimeEqualizerGains.clear();
+    return;
+  }
+  std::atomic_store_explicit(&_realtimeEqualizerProcessor, processor, std::memory_order_release);
+  _lastRealtimeEqualizerEnabled = enabled;
+  _lastRealtimeEqualizerGains = gains;
+}
+
 - (void)applySoundEffectConfigLocked {
-  if (self.equalizerNode == nil) return;
+  if (self.timePitchNode == nil) return;
 
   NSDictionary *config = LXCurrentSoundEffectConfig();
   NSDictionary *equalizerConfig = [config[@"equalizer"] isKindOfClass:[NSDictionary class]] ? config[@"equalizer"] : config;
@@ -2687,7 +2831,12 @@ RCT_EXPORT_MODULE();
   BOOL enabled = [equalizerConfig[@"enabled"] boolValue];
   NSArray<NSNumber *> *gains = [equalizerConfig[@"gains"] isKindOfClass:[NSArray class]] ? equalizerConfig[@"gains"] : LXSoundEffectDefaultEqualizerGains();
   NSArray<NSNumber *> *frequencies = LXSoundEffectEqualizerFrequencies();
-  NSUInteger bandCount = MIN(MIN(gains.count, frequencies.count), self.equalizerNode.bands.count);
+  std::vector<float> equalizerGains;
+  equalizerGains.reserve(frequencies.count);
+  for (NSUInteger index = 0; index < frequencies.count; index += 1) {
+    id value = index < gains.count ? gains[index] : nil;
+    equalizerGains.push_back([value respondsToSelector:@selector(floatValue)] ? [value floatValue] : 0.0f);
+  }
   NSString *convolutionFileName = [convolutionConfig[@"fileName"] isKindOfClass:[NSString class]] ? convolutionConfig[@"fileName"] : @"";
   NSString *convolutionAssetUri = [convolutionConfig[@"assetUri"] isKindOfClass:[NSString class]] ? convolutionConfig[@"assetUri"] : @"";
   float convolutionMainGain = LXSoundEffectClampFloatValue(convolutionConfig[@"mainGain"], 10.0f, 0.0f, 50.0f);
@@ -2697,6 +2846,7 @@ RCT_EXPORT_MODULE();
   float pannerSpeed = LXSoundEffectClampFloatValue(pannerConfig[@"speed"], 25.0f, 1.0f, 50.0f);
   float pitchPlaybackRate = LXSoundEffectClampFloatValue(pitchShifterConfig[@"playbackRate"], 1.0f, 0.5f, 1.5f);
   _pitchPlaybackRate.store(pitchPlaybackRate, std::memory_order_release);
+  [self refreshEqualizerEngineLockedWithEnabled:enabled gains:equalizerGains];
   BOOL hasConvolution = convolutionFileName.length > 0;
   BOOL usesTrueConvolution = hasConvolution && [self refreshConvolutionEngineLockedWithAssetUri:convolutionAssetUri fileName:convolutionFileName mainGain:convolutionMainGain sendGain:convolutionSendGain];
   if (!hasConvolution) {
@@ -2710,20 +2860,6 @@ RCT_EXPORT_MODULE();
     else pannerProcessor->updateSoundR(pannerSoundR, pannerSpeed);
   } else {
     [self stopPannerLocked];
-  }
-
-  self.equalizerNode.globalGain = 0.0f;
-  self.equalizerNode.bypass = !enabled;
-  for (NSUInteger index = 0; index < bandCount; index += 1) {
-    AVAudioUnitEQFilterParameters *band = self.equalizerNode.bands[index];
-    band.filterType = AVAudioUnitEQFilterTypeParametric;
-    band.frequency = [frequencies[index] floatValue];
-    band.bandwidth = 1.41f;
-    band.gain = [gains[index] floatValue];
-    band.bypass = !enabled;
-  }
-  for (NSUInteger index = bandCount; index < self.equalizerNode.bands.count; index += 1) {
-    self.equalizerNode.bands[index].bypass = YES;
   }
 
   if (self.timePitchNode != nil) {
@@ -2813,7 +2949,6 @@ RCT_EXPORT_MODULE();
     [self.engine stop];
     if (self.sourceNode != nil) [self.engine detachNode:self.sourceNode];
     if (self.timePitchNode != nil) [self.engine detachNode:self.timePitchNode];
-    if (self.equalizerNode != nil) [self.engine detachNode:self.equalizerNode];
     if (self.reverbNode != nil) [self.engine detachNode:self.reverbNode];
     if (self.dryMixerNode != nil) [self.engine detachNode:self.dryMixerNode];
     if (self.wetMixerNode != nil) [self.engine detachNode:self.wetMixerNode];
@@ -2821,13 +2956,17 @@ RCT_EXPORT_MODULE();
   }
   self.sourceNode = nil;
   self.timePitchNode = nil;
-  self.equalizerNode = nil;
   self.reverbNode = nil;
   self.dryMixerNode = nil;
   self.wetMixerNode = nil;
   self.soundEffectMixerNode = nil;
   self.engine = nil;
   self.outputFormat = nil;
+  std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
+  _lastRealtimeEqualizerEnabled = NO;
+  _lastRealtimeEqualizerGains.clear();
   _pcmBuffer.reset();
 }
 
@@ -2893,6 +3032,11 @@ RCT_EXPORT_MODULE();
   NSUInteger activeChannels = MIN((NSUInteger)bufferCount, self.channels);
   size_t framesRead = _pcmBuffer->read(channelPointers, frameCount, activeChannels);
   if (framesRead > 0) {
+    std::shared_ptr<LXRealtimeEqualizerProcessor> equalizerProcessor = std::atomic_load_explicit(&_realtimeEqualizerProcessor, std::memory_order_acquire);
+    if (equalizerProcessor != nullptr) {
+      equalizerProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels);
+    }
+
     std::shared_ptr<LXRealtimePhaseVocoderPitchShifter> pitchProcessor = std::atomic_load_explicit(&_realtimePitchProcessor, std::memory_order_acquire);
     if (pitchProcessor != nullptr) {
       pitchProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels, _pitchPlaybackRate.load(std::memory_order_acquire));
@@ -2953,20 +3097,17 @@ RCT_EXPORT_MODULE();
       return [strongSelf renderSourceFramesToBufferList:outputData frameCount:frameCount isSilence:isSilence timestamp:timestamp];
     }];
     self.timePitchNode = [[AVAudioUnitTimePitch alloc] init];
-    self.equalizerNode = [[AVAudioUnitEQ alloc] initWithNumberOfBands:(NSUInteger)LXSoundEffectEqualizerFrequencies().count];
     self.reverbNode = [[AVAudioUnitReverb alloc] init];
     self.dryMixerNode = [[AVAudioMixerNode alloc] init];
     self.wetMixerNode = [[AVAudioMixerNode alloc] init];
     self.soundEffectMixerNode = [[AVAudioMixerNode alloc] init];
     [self.engine attachNode:self.sourceNode];
-    [self.engine attachNode:self.equalizerNode];
     [self.engine attachNode:self.timePitchNode];
     [self.engine attachNode:self.reverbNode];
     [self.engine attachNode:self.dryMixerNode];
     [self.engine attachNode:self.wetMixerNode];
     [self.engine attachNode:self.soundEffectMixerNode];
-    [self.engine connect:self.sourceNode to:self.equalizerNode format:self.outputFormat];
-    [self.engine connect:self.equalizerNode to:self.timePitchNode format:self.outputFormat];
+    [self.engine connect:self.sourceNode to:self.timePitchNode format:self.outputFormat];
     AVAudioConnectionPoint *dryConnectionPoint = [[AVAudioConnectionPoint alloc] initWithNode:self.dryMixerNode bus:0];
     AVAudioConnectionPoint *reverbConnectionPoint = [[AVAudioConnectionPoint alloc] initWithNode:self.reverbNode bus:0];
     [self.engine connect:self.timePitchNode
