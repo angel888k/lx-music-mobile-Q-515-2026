@@ -17,6 +17,7 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include "LXSharedIRConvolutionKernel.hpp"
 
 #if __has_include(<FLAC/stream_decoder.h>)
 #import <FLAC/stream_decoder.h>
@@ -1631,57 +1632,6 @@ public:
   }
 
 private:
-  float _attackCoeff = 0.0f;
-  float _releaseCoeff = 0.0f;
-  float _currentGain = 1.0f;
-  bool _isReady = false;
-};
-
-class LXRealtimeDynamicsProcessor {
-public:
-  explicit LXRealtimeDynamicsProcessor(double sampleRate) {
-    if (sampleRate <= 0) return;
-    _sampleRate = sampleRate;
-    _attackCoeff = expf(-1.0f / (0.003f * (float)sampleRate));
-    _releaseCoeff = expf(-1.0f / (0.25f * (float)sampleRate));
-    _isReady = true;
-  }
-
-  bool isReady() const {
-    return _isReady;
-  }
-
-  void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels) {
-    if (!_isReady || channels == NULL || activeChannels == 0) return;
-
-    for (NSUInteger frame = 0; frame < frameCount; frame++) {
-      float peak = 0.0f;
-      for (NSUInteger channel = 0; channel < activeChannels; channel++) {
-        peak = fmaxf(peak, fabsf(channels[channel][frame]));
-      }
-
-      float targetGain = 1.0f;
-      if (peak > 0.000001f) {
-        float levelDb = 20.0f * log10f(peak);
-        if (levelDb > -24.0f) {
-          float compressedDb = -24.0f + (levelDb + 24.0f) / 12.0f;
-          float gainDb = compressedDb - levelDb;
-          targetGain = powf(10.0f, gainDb / 20.0f);
-        }
-      }
-
-      float coeff = targetGain < _currentGain ? _attackCoeff : _releaseCoeff;
-      _currentGain = coeff * _currentGain + (1.0f - coeff) * targetGain;
-      _currentGain = fmaxf(0.0f, fminf(_currentGain, 1.0f));
-
-      for (NSUInteger channel = 0; channel < activeChannels; channel++) {
-        channels[channel][frame] *= _currentGain;
-      }
-    }
-  }
-
-private:
-  double _sampleRate = 0;
   float _attackCoeff = 0.0f;
   float _releaseCoeff = 0.0f;
   float _currentGain = 1.0f;
