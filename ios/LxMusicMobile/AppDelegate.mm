@@ -2367,6 +2367,18 @@ RCT_EXPORT_MODULE();
                                                  name:AVAudioSessionInterruptionNotification
                                                object:[AVAudioSession sharedInstance]];
     [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleApplicationWillResignActive:)
+                                                 name:UIApplicationWillResignActiveNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleApplicationDidEnterBackground:)
+                                                 name:UIApplicationDidEnterBackgroundNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleApplicationDidBecomeActive:)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(handleSoundEffectConfigChanged:)
                                                  name:LXSoundEffectConfigDidChangeNotification
                                                object:nil];
@@ -2570,6 +2582,33 @@ RCT_EXPORT_MODULE();
   dispatch_async(self.renderQueue, ^{
     [self applySoundEffectConfigLocked];
   });
+}
+
+- (BOOL)shouldRestorePlaybackOutputLocked {
+  if (self.stopRequested || self.currentURL.length == 0) return NO;
+  if (self.manualPause) return NO;
+  if (self.sourceNode == nil || self.soundEffectMixerNode == nil) return NO;
+  return ![self.currentState isEqualToString:@"idle"] && ![self.currentState isEqualToString:@"stopped"];
+}
+
+- (void)restorePlaybackOutputLocked {
+  if (![self shouldRestorePlaybackOutputLocked]) return;
+  self.soundEffectMixerNode.outputVolume = self.currentVolume;
+  if (self.timePitchNode != nil) self.timePitchNode.rate = self.currentRate;
+  [self applySoundEffectConfigLocked];
+}
+
+- (void)schedulePlaybackOutputRestoreWithDelays:(NSArray<NSNumber *> *)delays {
+  dispatch_async(self.renderQueue, ^{
+    [self restorePlaybackOutputLocked];
+  });
+
+  for (NSNumber *delay in delays) {
+    NSTimeInterval delaySeconds = MAX(delay.doubleValue, 0);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delaySeconds * NSEC_PER_SEC)), self.renderQueue, ^{
+      [self restorePlaybackOutputLocked];
+    });
+  }
 }
 
 - (void)stopPannerLocked {
@@ -2825,6 +2864,7 @@ RCT_EXPORT_MODULE();
         [self emitErrorMessage:engineError.localizedDescription ?: @"Failed to restart audio engine after interruption"];
         return;
       }
+      [self schedulePlaybackOutputRestoreWithDelays:@[ @0.15, @0.6 ]];
       if (shouldEmitBuffering) {
         [self emitState:@"buffering" position:@(self.lastKnownPosition) duration:@(self.duration)];
       }
@@ -3065,6 +3105,21 @@ RCT_EXPORT_MODULE();
     self.playbackStarted = YES;
     [self emitState:@"playing" position:@(self.lastKnownPosition) duration:@(self.duration)];
   }
+}
+
+- (void)handleApplicationWillResignActive:(NSNotification *)notification {
+  if (self.currentURL.length == 0) return;
+  [self schedulePlaybackOutputRestoreWithDelays:@[ @0.08, @0.35 ]];
+}
+
+- (void)handleApplicationDidEnterBackground:(NSNotification *)notification {
+  if (self.currentURL.length == 0) return;
+  [self schedulePlaybackOutputRestoreWithDelays:@[ @0.15, @0.6 ]];
+}
+
+- (void)handleApplicationDidBecomeActive:(NSNotification *)notification {
+  if (self.currentURL.length == 0) return;
+  [self schedulePlaybackOutputRestoreWithDelays:@[ @0.05, @0.2, @0.8 ]];
 }
 
 - (void)waitForBufferCapacityIfNeeded {
