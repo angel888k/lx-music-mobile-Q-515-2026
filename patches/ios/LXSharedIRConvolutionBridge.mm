@@ -36,10 +36,12 @@
   _kernel->updateGains(dryGain, wetGain);
 }
 
-- (void)processChannels:(float * _Nonnull * _Nonnull)channels
-             frameCount:(NSUInteger)frameCount
-         activeChannels:(NSUInteger)activeChannels {
-  if (_kernel == nullptr || channels == nullptr) return;
+- (void)processStereoChannel0:(float * _Nonnull)channel0
+                     channel1:(float * _Nullable)channel1
+                   frameCount:(NSUInteger)frameCount
+               activeChannels:(NSUInteger)activeChannels {
+  if (_kernel == nullptr || channel0 == nullptr || activeChannels == 0) return;
+  float *channels[2] = { channel0, channel1 };
   _kernel->processPCMChannels(channels, frameCount, activeChannels);
 }
 

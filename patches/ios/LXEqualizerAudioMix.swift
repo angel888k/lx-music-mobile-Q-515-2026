@@ -353,26 +353,6 @@ private final class LXDynamicsProcessor {
     }
 }
 
-private func withUnsafeMutableChannelPointers<R>(_ channels: inout [[Float]], _ body: (UnsafeMutablePointer<UnsafeMutablePointer<Float>>) -> R) -> R {
-    var pointers = Array<UnsafeMutablePointer<Float>>(repeating: .init(bitPattern: 0x1)!, count: channels.count)
-    return channels.withUnsafeMutableBufferPointer { channelBuffers in
-        func recurse(_ index: Int) -> R {
-            if index >= channelBuffers.count {
-                return pointers.withUnsafeMutableBufferPointer { pointerBuffer in
-                    body(pointerBuffer.baseAddress!)
-                }
-            }
-
-            return channelBuffers[index].withUnsafeMutableBufferPointer { buffer in
-                pointers[index] = buffer.baseAddress!
-                return recurse(index + 1)
-            }
-        }
-
-        return recurse(0)
-    }
-}
-
 struct LXSoundEffectConfiguration {
     var equalizerEnabled = false
     var gains = LXEqualizerAudioMixController.normalizeGains([])
@@ -1148,9 +1128,27 @@ private final class LXConvolutionEngine {
             return
         }
 
-        withUnsafeMutableChannelPointers(&inputBuffer) { pointers in
-            kernel.updateDryGain(dryGain, wetGain: wetGain)
-            kernel.processChannels(pointers, frameCount: UInt(blockSize), activeChannels: UInt(min(channelCount, outputChannels)))
+        let activeChannels = min(channelCount, outputChannels)
+        inputBuffer[0].withUnsafeMutableBufferPointer { channel0 in
+            if activeChannels > 1 {
+                inputBuffer[1].withUnsafeMutableBufferPointer { channel1 in
+                    kernel.updateDryGain(dryGain, wetGain: wetGain)
+                    kernel.processStereoChannel0(
+                        channel0.baseAddress!,
+                        channel1: channel1.baseAddress,
+                        frameCount: UInt(blockSize),
+                        activeChannels: UInt(activeChannels)
+                    )
+                }
+            } else {
+                kernel.updateDryGain(dryGain, wetGain: wetGain)
+                kernel.processStereoChannel0(
+                    channel0.baseAddress!,
+                    channel1: nil,
+                    frameCount: UInt(blockSize),
+                    activeChannels: UInt(activeChannels)
+                )
+            }
         }
 
         for channel in 0..<outputChannels {

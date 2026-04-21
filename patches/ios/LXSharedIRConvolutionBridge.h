@@ -16,9 +16,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)isReady;
 - (void)updateDryGain:(float)dryGain wetGain:(float)wetGain;
-- (void)processChannels:(float * _Nonnull * _Nonnull)channels
-             frameCount:(NSUInteger)frameCount
-         activeChannels:(NSUInteger)activeChannels;
+- (void)processStereoChannel0:(float * _Nonnull)channel0
+                     channel1:(float * _Nullable)channel1
+                   frameCount:(NSUInteger)frameCount
+               activeChannels:(NSUInteger)activeChannels;
 
 @end
 
