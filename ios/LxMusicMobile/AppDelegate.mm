@@ -2634,7 +2634,7 @@ RCT_EXPORT_MODULE();
   dispatch_async(self.renderQueue, ^{
     if (generation != self.playbackGeneration) return;
     if (_sourceRenderingEnabled.load(std::memory_order_acquire)) return;
-    if (self.stopRequested || !self.downloadCompleted || [self currentQueuedFrameCountLocked] > 0) return;
+    if (self.stopRequested || self.streamError != nil || !self.downloadCompleted || [self currentQueuedFrameCountLocked] > 0) return;
     self.lastKnownPosition = [self currentPlaybackPositionLocked];
     self.playbackStarted = NO;
     self.currentState = @"stopped";
@@ -3308,7 +3308,7 @@ RCT_EXPORT_MODULE();
     self.decoder = NULL;
 
     dispatch_async(self.renderQueue, ^{
-      if (self.downloadCompleted && [self currentQueuedFrameCountLocked] == 0 && !self.stopRequested &&
+      if (self.streamError == nil && self.downloadCompleted && [self currentQueuedFrameCountLocked] == 0 && !self.stopRequested &&
           !_endedNotificationScheduled.exchange(true, std::memory_order_acq_rel)) {
         self.lastKnownPosition = [self currentPlaybackPositionLocked];
         self.playbackStarted = NO;

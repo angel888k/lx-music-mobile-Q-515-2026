@@ -52,24 +52,36 @@ const PlaceholderCheckbox = memo(({
   checked,
   label,
   onPress,
-  checkedIconName = 'checkbox-marked',
-  uncheckedIconName = 'checkbox-blank-outline',
+  indicatorType = 'checkbox',
 }: {
   checked: boolean
   label: string
   onPress: () => void
-  checkedIconName?: string
-  uncheckedIconName?: string
+  indicatorType?: 'checkbox' | 'radio'
 }) => {
   const theme = useTheme()
 
   return (
     <TouchableOpacity style={styles.placeholderCheckbox} activeOpacity={0.7} onPress={onPress}>
-      <Icon
-        name={checked ? checkedIconName : uncheckedIconName}
-        size={15}
-        color={checked ? theme['c-primary-font-active'] : theme['c-font-label']}
-      />
+      {indicatorType == 'radio'
+        ? (
+            <View
+              style={{
+                ...styles.radioIndicator,
+                borderColor: checked ? theme['c-primary-font-active'] : theme['c-font-label'],
+              }}>
+              {checked
+                ? <View style={{ ...styles.radioIndicatorInner, backgroundColor: theme['c-primary-font-active'] }} />
+                : null}
+            </View>
+          )
+        : (
+            <Icon
+              name={checked ? 'checkbox-marked' : 'checkbox-blank-outline'}
+              size={15}
+              color={checked ? theme['c-primary-font-active'] : theme['c-font-label']}
+            />
+          )}
       <Text size={13}>{label}</Text>
     </TouchableOpacity>
   )
@@ -337,8 +349,7 @@ const EnvironmentSection = memo(({
           checked={!selectedSource}
           label={t('setting_play_sound_effect_preset_none')}
           onPress={() => { onToggleConvolution('') }}
-          checkedIconName="radiobox-marked"
-          uncheckedIconName="radiobox-blank"
+          indicatorType="radio"
         />
         {soundEffectConvolutionOptions.map(item => (
           <PlaceholderCheckbox
@@ -346,8 +357,7 @@ const EnvironmentSection = memo(({
             checked={selectedSource == item.source}
             label={t(item.labelKey)}
             onPress={() => { onToggleConvolution(item.source) }}
-            checkedIconName="radiobox-marked"
-            uncheckedIconName="radiobox-blank"
+            indicatorType="radio"
           />
         ))}
       </View>
@@ -925,6 +935,19 @@ const styles = createStyle({
     marginRight: 10,
     marginBottom: 6,
     gap: 3,
+  },
+  radioIndicator: {
+    width: 15,
+    height: 15,
+    borderRadius: 8,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  radioIndicatorInner: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
   },
   placeholderGroup: {
     gap: 8,
