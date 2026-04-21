@@ -126,7 +126,9 @@ public:
           _outputReadIndex = 0;
         }
       } else {
-        for (size_t channel = 0; channel < usedChannels; channel++) channels[channel][frame] = 0.0f;
+        for (size_t channel = 0; channel < usedChannels; channel++) {
+          channels[channel][frame] *= _dryGain;
+        }
       }
     }
   }

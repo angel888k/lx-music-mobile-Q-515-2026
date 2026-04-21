@@ -1577,8 +1577,10 @@ private:
     for (float gain : gains) {
       if (gain > maxPositiveGain) maxPositiveGain = gain;
     }
-    if (maxPositiveGain <= 0.0f) return 1.0f;
-    return powf(10.0f, -maxPositiveGain / 20.0f);
+    const float thresholdDb = 6.0f;
+    const float ratio = 2.0f;
+    if (maxPositiveGain <= thresholdDb) return 1.0f;
+    return powf(10.0f, -(maxPositiveGain - thresholdDb) / (20.0f * ratio));
   }
 
   double _sampleRate = 0;
@@ -1624,9 +1626,13 @@ public:
       float coeff = targetGain < _currentGain ? _attackCoeff : _releaseCoeff;
       _currentGain = coeff * _currentGain + (1.0f - coeff) * targetGain;
       _currentGain = fmaxf(0.0f, fminf(_currentGain, 1.0f));
+      float safeGain = fmaxf(_currentGain, 0.000001f);
+      float reductionDb = -20.0f * log10f(safeGain);
+      float makeupGain = powf(10.0f, (reductionDb * _makeupRatio) / 20.0f);
+      float outputGain = fminf(makeupGain * _currentGain, 1.0f);
 
       for (NSUInteger channel = 0; channel < activeChannels; channel++) {
-        channels[channel][frame] *= _currentGain;
+        channels[channel][frame] *= outputGain;
       }
     }
   }
@@ -1634,6 +1640,7 @@ public:
 private:
   float _attackCoeff = 0.0f;
   float _releaseCoeff = 0.0f;
+  float _makeupRatio = 0.6f;
   float _currentGain = 1.0f;
   bool _isReady = false;
 };

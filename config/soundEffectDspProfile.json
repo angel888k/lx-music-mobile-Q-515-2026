@@ -2,12 +2,15 @@
   "equalizerFrequencies": [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000],
   "equalizerQ": 1.41,
   "equalizerBypassThreshold": 0.01,
-  "equalizerHeadroomMode": "maxPositiveGain",
+  "equalizerHeadroomMode": "softKneePositiveGain",
+  "equalizerHeadroomThresholdDb": 6,
+  "equalizerHeadroomRatio": 2,
   "dynamics": {
     "thresholdDb": -24,
     "ratio": 12,
     "attackSeconds": 0.003,
-    "releaseSeconds": 0.25
+    "releaseSeconds": 0.25,
+    "makeupRatio": 0.6
   },
   "pitch": {
     "defaultRate": 1,

@@ -37,6 +37,8 @@ const frequencyList = profile.equalizerFrequencies.join(', ')
 const pitchBypass = profile.pitch.bypassThreshold
 const eqBypass = profile.equalizerBypassThreshold
 const q = profile.equalizerQ
+const headroomThresholdDb = profile.equalizerHeadroomThresholdDb
+const headroomRatio = profile.equalizerHeadroomRatio
 const blockSize = profile.phaseVocoder.blockSize
 const hopSize = profile.phaseVocoder.hopSize
 const windowScale = profile.phaseVocoder.windowScale
@@ -47,6 +49,7 @@ const dynamicsThresholdDb = profile.dynamics.thresholdDb
 const dynamicsRatio = profile.dynamics.ratio
 const dynamicsAttack = profile.dynamics.attackSeconds
 const dynamicsRelease = profile.dynamics.releaseSeconds
+const dynamicsMakeupRatio = profile.dynamics.makeupRatio
 
 expectIncludes(appDelegate, `frequencies = @[ @${profile.equalizerFrequencies.join(', @')} ];`, 'AppDelegate equalizer frequencies')
 expectIncludes(swiftPatch, `let lxSoundEffectBandFrequencies: [Float] = [${frequencyList}]`, 'Swift equalizer frequencies')
@@ -68,14 +71,20 @@ expectCountAtLeast(appDelegate, new RegExp(`fabsf\\(gain\\) < ${eqBypass.toFixed
 expectIncludes(swiftPatch, `if abs(gain) < ${eqBypass.toFixed(2)} { return .bypass }`, 'Swift EQ bypass threshold')
 expectIncludes(appDelegate, 'makeHeadroomGain', 'AppDelegate equalizer headroom helper')
 expectIncludes(swiftPatch, 'makeHeadroomGain', 'Swift equalizer headroom helper')
+expectIncludes(appDelegate, `const float thresholdDb = ${headroomThresholdDb.toFixed(1)}f;`, 'AppDelegate equalizer headroom threshold')
+expectIncludes(appDelegate, `const float ratio = ${headroomRatio.toFixed(1)}f;`, 'AppDelegate equalizer headroom ratio')
+expectIncludes(swiftPatch, `let thresholdDb: Float = ${headroomThresholdDb.toFixed(0)}`, 'Swift equalizer headroom threshold')
+expectIncludes(swiftPatch, `let ratio: Float = ${headroomRatio.toFixed(0)}`, 'Swift equalizer headroom ratio')
 expectIncludes(appDelegate, `levelDb > ${dynamicsThresholdDb.toFixed(1)}f`, 'AppDelegate dynamics threshold')
 expectIncludes(appDelegate, `(${dynamicsAttack.toFixed(3)}f * (float)sampleRate)`, 'AppDelegate dynamics attack')
 expectIncludes(appDelegate, `(${dynamicsRelease.toFixed(2)}f * (float)sampleRate)`, 'AppDelegate dynamics release')
 expectIncludes(appDelegate, `compressedDb = ${dynamicsThresholdDb.toFixed(1)}f + (levelDb + ${(-dynamicsThresholdDb).toFixed(1)}f) / ${dynamicsRatio.toFixed(1)}f`, 'AppDelegate dynamics ratio expression')
+expectIncludes(appDelegate, `_makeupRatio = ${dynamicsMakeupRatio.toFixed(1)}f`, 'AppDelegate dynamics makeup ratio')
 expectIncludes(swiftPatch, `if levelDb > ${dynamicsThresholdDb.toFixed(0)}`, 'Swift dynamics threshold')
 expectIncludes(swiftPatch, '0.003 * Float(sampleRate)', 'Swift dynamics attack')
 expectIncludes(swiftPatch, '0.25 * Float(sampleRate)', 'Swift dynamics release')
 expectIncludes(swiftPatch, 'compressedDb = -24 + (levelDb + 24) / 12', 'Swift dynamics ratio expression')
+expectIncludes(swiftPatch, `private let makeupRatio: Float = ${dynamicsMakeupRatio.toFixed(1)}`, 'Swift dynamics makeup ratio')
 
 expectCountAtLeast(appDelegate, new RegExp(`LXSoundEffectClampFloatValue\\([^\\n]+${pitchDefault.toFixed(1)}f, ${pitchMin.toFixed(1)}f, ${pitchMax.toFixed(1)}f\\)`, 'g'), 2, 'AppDelegate pitch clamp range')
 expectIncludes(swiftPatch, `pitchPlaybackRate: clampedFloat(pitchInfo?["playbackRate"], defaultValue: ${pitchDefault}, minValue: ${pitchMin}, maxValue: ${pitchMax})`, 'Swift pitch clamp range')

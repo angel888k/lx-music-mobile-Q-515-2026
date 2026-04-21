@@ -317,6 +317,7 @@ private final class LXSpatialPannerEngine {
 private final class LXDynamicsProcessor {
     private let attackCoeff: Float
     private let releaseCoeff: Float
+    private let makeupRatio: Float = 0.6
     private var currentGain: Float = 1
 
     init?(sampleRate: Double) {
@@ -346,14 +347,18 @@ private final class LXDynamicsProcessor {
         let coeff = targetGain < currentGain ? attackCoeff : releaseCoeff
         currentGain = coeff * currentGain + (1 - coeff) * targetGain
         currentGain = max(0, min(currentGain, 1))
+        let safeGain = max(currentGain, 0.000001)
+        let reductionDb = -20 * log10(safeGain)
+        let makeupGain = pow(10, (reductionDb * makeupRatio) / 20)
+        let outputGain = min(makeupGain * currentGain, 1)
 
         for channel in 0..<activeChannels {
-            samples[channel] *= currentGain
+            samples[channel] *= outputGain
         }
     }
 }
 
-struct LXSoundEffectConfiguration {
+struct LXSoundEffectConfiguration: Equatable {
     var equalizerEnabled = false
     var gains = LXEqualizerAudioMixController.normalizeGains([])
     var convolutionFileName = ""
@@ -424,11 +429,13 @@ struct LXSoundEffectConfiguration {
 
 final class LXEqualizerAudioMixController {
     private let lock = NSLock()
+    private let convolutionLoadQueue = DispatchQueue(label: "com.lxmusicmobile.soundeffect.convolution", qos: .userInitiated)
     private var config = LXSoundEffectConfiguration()
     private var coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
     private var equalizerHeadroomGain: Float = 1
     private var eqStates: [[LXBiquadState]] = []
     private var convolutionEngine: LXConvolutionEngine?
+    private var pendingConvolutionLoadID: UInt64 = 0
     private var dynamicsProcessor: LXDynamicsProcessor?
     private var pitchEngine: LXPhaseVocoderPitchShifter?
     private var pannerEngine: LXSpatialPannerEngine?
@@ -457,9 +464,11 @@ final class LXEqualizerAudioMixController {
         lock.lock()
         defer { lock.unlock() }
 
+        let previousConfig = self.config
+        if previousConfig == config { return }
         self.config = config
         if sampleRate > 0 {
-            rebuildProcessingStateLocked(resetTime: false)
+            refreshProcessingStateLocked(previousConfig: previousConfig, resetTime: false)
         }
     }
 
@@ -533,7 +542,7 @@ final class LXEqualizerAudioMixController {
         bitsPerChannel = format.mBitsPerChannel
         isFloat = (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0
         isInterleaved = (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-        rebuildProcessingStateLocked(resetTime: true)
+        refreshProcessingStateLocked(previousConfig: config, resetTime: true)
     }
 
     private func unprepare() {
@@ -545,6 +554,7 @@ final class LXEqualizerAudioMixController {
         bitsPerChannel = 0
         isFloat = false
         isInterleaved = false
+        pendingConvolutionLoadID &+= 1
         equalizerHeadroomGain = 1
         eqStates.removeAll(keepingCapacity: false)
         convolutionEngine = nil
@@ -554,29 +564,120 @@ final class LXEqualizerAudioMixController {
         coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
     }
 
-    private func rebuildProcessingStateLocked(resetTime: Bool) {
+    private func refreshProcessingStateLocked(previousConfig: LXSoundEffectConfiguration, resetTime: Bool) {
+        refreshEqualizerStateLocked(previousConfig: previousConfig, resetTime: resetTime)
+        refreshConvolutionStateLocked(resetTime: resetTime)
+        refreshDynamicsStateLocked(resetTime: resetTime)
+        refreshPitchStateLocked(resetTime: resetTime)
+        refreshPannerStateLocked(resetTime: resetTime)
+    }
+
+    private func refreshEqualizerStateLocked(previousConfig: LXSoundEffectConfiguration, resetTime: Bool) {
         coefficients = config.hasEqualizer
             ? Self.makeCoefficients(sampleRate: sampleRate, gains: config.gains)
             : Array(repeating: .bypass, count: lxSoundEffectBandFrequencies.count)
         equalizerHeadroomGain = config.hasEqualizer ? Self.makeHeadroomGain(gains: config.gains) : 1
-        eqStates = Array(
-            repeating: Array(repeating: LXBiquadState(), count: coefficients.count),
-            count: channelsPerFrame
-        )
 
-        convolutionEngine = config.hasConvolution
-            ? LXConvolutionEngine(
-                config: config,
-                sampleRate: sampleRate,
-                channelCount: channelsPerFrame
+        let shouldResetStates = resetTime ||
+            eqStates.count != channelsPerFrame ||
+            previousConfig.hasEqualizer != config.hasEqualizer
+        if shouldResetStates {
+            eqStates = Array(
+                repeating: Array(repeating: LXBiquadState(), count: coefficients.count),
+                count: channelsPerFrame
             )
-            : nil
+        }
+    }
 
-        dynamicsProcessor = config.isActive ? LXDynamicsProcessor(sampleRate: sampleRate) : nil
-        pitchEngine = config.hasPitchShift ? LXPhaseVocoderPitchShifter(channelCount: channelsPerFrame) : nil
-        pannerEngine = config.hasPanner && channelsPerFrame >= 2
-            ? LXSpatialPannerEngine(sampleRate: sampleRate, soundR: config.pannerSoundR, speed: config.pannerSpeed)
-            : nil
+    private func refreshConvolutionStateLocked(resetTime: Bool) {
+        guard sampleRate > 0, channelsPerFrame > 0, config.hasConvolution else {
+            pendingConvolutionLoadID &+= 1
+            convolutionEngine = nil
+            return
+        }
+
+        if let engine = convolutionEngine,
+           engine.matches(config: config, sampleRate: sampleRate, channelCount: channelsPerFrame) {
+            engine.updateGains(mainGain: config.convolutionMainGain / 10, sendGain: config.convolutionSendGain / 10)
+            return
+        }
+
+        let configSnapshot = config
+        let sampleRateSnapshot = sampleRate
+        let channelCountSnapshot = channelsPerFrame
+        pendingConvolutionLoadID &+= 1
+        let loadID = pendingConvolutionLoadID
+        convolutionEngine = nil
+
+        convolutionLoadQueue.async { [weak self] in
+            let engine = LXConvolutionEngine(
+                config: configSnapshot,
+                sampleRate: sampleRateSnapshot,
+                channelCount: channelCountSnapshot
+            )
+            self?.finishConvolutionLoad(
+                loadID: loadID,
+                configSnapshot: configSnapshot,
+                sampleRate: sampleRateSnapshot,
+                channelCount: channelCountSnapshot,
+                engine: engine
+            )
+        }
+    }
+
+    private func finishConvolutionLoad(
+        loadID: UInt64,
+        configSnapshot: LXSoundEffectConfiguration,
+        sampleRate: Double,
+        channelCount: Int,
+        engine: LXConvolutionEngine?
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard pendingConvolutionLoadID == loadID,
+              abs(self.sampleRate - sampleRate) <= 1,
+              self.channelsPerFrame == channelCount,
+              self.config.convolutionFileName == configSnapshot.convolutionFileName,
+              self.config.convolutionAssetUri == configSnapshot.convolutionAssetUri else {
+            return
+        }
+
+        convolutionEngine = engine
+        convolutionEngine?.updateGains(
+            mainGain: config.convolutionMainGain / 10,
+            sendGain: config.convolutionSendGain / 10
+        )
+    }
+
+    private func refreshDynamicsStateLocked(resetTime: Bool) {
+        guard config.isActive else {
+            dynamicsProcessor = nil
+            return
+        }
+        if resetTime || dynamicsProcessor == nil {
+            dynamicsProcessor = LXDynamicsProcessor(sampleRate: sampleRate)
+        }
+    }
+
+    private func refreshPitchStateLocked(resetTime: Bool) {
+        guard config.hasPitchShift else {
+            pitchEngine = nil
+            return
+        }
+        if resetTime || pitchEngine == nil {
+            pitchEngine = LXPhaseVocoderPitchShifter(channelCount: channelsPerFrame)
+        }
+    }
+
+    private func refreshPannerStateLocked(resetTime: Bool) {
+        guard config.hasPanner, channelsPerFrame >= 2 else {
+            pannerEngine = nil
+            return
+        }
+        if resetTime || pannerEngine == nil {
+            pannerEngine = LXSpatialPannerEngine(sampleRate: sampleRate, soundR: config.pannerSoundR, speed: config.pannerSpeed)
+        }
         pannerEngine?.update(soundR: config.pannerSoundR, speed: config.pannerSpeed)
     }
 
@@ -805,8 +906,10 @@ final class LXEqualizerAudioMixController {
         let maxPositiveGain = gains.reduce(Float(0)) { partialResult, gain in
             max(partialResult, gain)
         }
-        guard maxPositiveGain > 0 else { return 1 }
-        return pow(10, -maxPositiveGain / 20)
+        let thresholdDb: Float = 6
+        let ratio: Float = 2
+        guard maxPositiveGain > thresholdDb else { return 1 }
+        return pow(10, -(maxPositiveGain - thresholdDb) / (20 * ratio))
     }
 
     private static func makeCoefficients(sampleRate: Double, gains: [Float]) -> [LXBiquadCoefficients] {
@@ -1044,11 +1147,13 @@ private final class LXFFTConvolution {
 }
 
 private final class LXConvolutionEngine {
+    private let assetKey: String
+    private let sampleRate: Double
     private let channelCount: Int
     private let outputChannels: Int
     private let blockSize: Int
-    private let dryGain: Float
-    private let wetGain: Float
+    private var dryGain: Float
+    private var wetGain: Float
     private let kernel: LXSharedIRConvolutionBridge?
     private var inputBuffer: [[Float]]
     private var inputFill = 0
@@ -1058,12 +1163,15 @@ private final class LXConvolutionEngine {
 
     init?(config: LXSoundEffectConfiguration, sampleRate: Double, channelCount: Int) {
         let effectiveChannels = max(1, min(channelCount, 2))
+        guard let assetKey = Self.assetKey(assetUri: config.convolutionAssetUri, fileName: config.convolutionFileName) else { return nil }
         guard let response = Self.loadImpulseResponse(
             assetUri: config.convolutionAssetUri,
             fileName: config.convolutionFileName,
             sampleRate: sampleRate
         ) else { return nil }
 
+        self.assetKey = assetKey
+        self.sampleRate = sampleRate
         self.channelCount = effectiveChannels
         self.outputChannels = max(1, min(effectiveChannels, 2))
         self.blockSize = 512
@@ -1083,6 +1191,22 @@ private final class LXConvolutionEngine {
         self.inputBuffer = Array(repeating: Array(repeating: 0, count: self.blockSize), count: effectiveChannels)
         self.outputQueue = Array(repeating: Array(repeating: 0, count: self.blockSize), count: self.outputChannels)
         guard kernel?.isReady() == true else { return nil }
+    }
+
+    func matches(config: LXSoundEffectConfiguration, sampleRate: Double, channelCount: Int) -> Bool {
+        let effectiveChannels = max(1, min(channelCount, 2))
+        guard let nextAssetKey = Self.assetKey(assetUri: config.convolutionAssetUri, fileName: config.convolutionFileName) else {
+            return false
+        }
+        return assetKey == nextAssetKey &&
+            abs(self.sampleRate - sampleRate) <= 1 &&
+            self.channelCount == effectiveChannels
+    }
+
+    func updateGains(mainGain: Float, sendGain: Float) {
+        dryGain = mainGain
+        wetGain = sendGain
+        kernel?.updateDryGain(mainGain, wetGain: sendGain)
     }
 
     func processFrame(_ samples: inout [Float], activeChannels: Int) {
@@ -1110,7 +1234,7 @@ private final class LXConvolutionEngine {
             }
         } else {
             for channel in 0..<usedChannels {
-                samples[channel] = 0
+                samples[channel] *= dryGain
             }
         }
     }
@@ -1132,7 +1256,6 @@ private final class LXConvolutionEngine {
         inputBuffer[0].withUnsafeMutableBufferPointer { channel0 in
             if activeChannels > 1 {
                 inputBuffer[1].withUnsafeMutableBufferPointer { channel1 in
-                    kernel.updateDryGain(dryGain, wetGain: wetGain)
                     kernel.processStereoChannel0(
                         channel0.baseAddress!,
                         channel1: channel1.baseAddress,
@@ -1141,7 +1264,6 @@ private final class LXConvolutionEngine {
                     )
                 }
             } else {
-                kernel.updateDryGain(dryGain, wetGain: wetGain)
                 kernel.processStereoChannel0(
                     channel0.baseAddress!,
                     channel1: nil,
@@ -1187,6 +1309,11 @@ private final class LXConvolutionEngine {
             channels = channels.map { channel in channel.map { $0 * normalizationScale } }
         }
         return channels
+    }
+
+    private static func assetKey(assetUri: String, fileName: String) -> String? {
+        guard let url = resolveAssetURL(assetUri: assetUri, fileName: fileName) else { return nil }
+        return url.absoluteString.isEmpty ? fileName : url.absoluteString
     }
 
     private static func resolveAssetURL(assetUri: String, fileName: String) -> URL? {
