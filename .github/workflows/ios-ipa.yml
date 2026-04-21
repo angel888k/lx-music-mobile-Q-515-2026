@@ -122,11 +122,6 @@ jobs:
           prerelease: false
           draft: false
           files: build/lx-music-mobile-v${{ env.PACKAGE_VERSION }}-ios-unsigned.ipa
-          body: |
-            iOS unsigned IPA for v${{ env.PACKAGE_VERSION }}.
-
-            File:
-            - `lx-music-mobile-v${{ env.PACKAGE_VERSION }}-ios-unsigned.ipa`
 
       - name: Install signing certificate
         if: ${{ env.IOS_P12_BASE64 != '' && env.IOS_P12_PASSWORD != '' && env.IOS_MOBILEPROVISION_BASE64 != '' && env.IOS_TEAM_ID != '' }}
