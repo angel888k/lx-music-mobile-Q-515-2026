@@ -353,8 +353,8 @@ private final class LXDynamicsProcessor {
     }
 }
 
-private func withUnsafeMutableChannelPointers<R>(_ channels: inout [[Float]], _ body: (UnsafeMutablePointer<UnsafeMutablePointer<Float>?>) -> R) -> R {
-    var pointers = Array<UnsafeMutablePointer<Float>?>(repeating: nil, count: channels.count)
+private func withUnsafeMutableChannelPointers<R>(_ channels: inout [[Float]], _ body: (UnsafeMutablePointer<UnsafeMutablePointer<Float>>) -> R) -> R {
+    var pointers = Array<UnsafeMutablePointer<Float>>(repeating: .init(bitPattern: 0x1)!, count: channels.count)
 
     func recurse(_ index: Int) -> R {
         if index >= channels.count {
@@ -364,7 +364,7 @@ private func withUnsafeMutableChannelPointers<R>(_ channels: inout [[Float]], _ 
         }
 
         return channels[index].withUnsafeMutableBufferPointer { buffer in
-            pointers[index] = buffer.baseAddress
+            pointers[index] = buffer.baseAddress!
             return recurse(index + 1)
         }
     }
@@ -1093,9 +1093,9 @@ private final class LXConvolutionEngine {
         }
         self.kernel = LXSharedIRConvolutionBridge(
             irChannels: bridgedChannels,
-            inputChannels: effectiveChannels,
-            outputChannels: self.outputChannels,
-            blockSize: self.blockSize,
+            inputChannels: UInt(effectiveChannels),
+            outputChannels: UInt(self.outputChannels),
+            blockSize: UInt(self.blockSize),
             dryGain: self.dryGain,
             wetGain: self.wetGain
         )
@@ -1149,7 +1149,7 @@ private final class LXConvolutionEngine {
 
         withUnsafeMutableChannelPointers(&inputBuffer) { pointers in
             kernel.updateDryGain(dryGain, wetGain: wetGain)
-            kernel.processChannels(pointers, frameCount: blockSize, activeChannels: min(channelCount, outputChannels))
+            kernel.processChannels(pointers, frameCount: UInt(blockSize), activeChannels: UInt(min(channelCount, outputChannels)))
         }
 
         for channel in 0..<outputChannels {
