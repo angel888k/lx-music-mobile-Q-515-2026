@@ -52,36 +52,20 @@ const PlaceholderCheckbox = memo(({
   checked,
   label,
   onPress,
-  indicatorType = 'checkbox',
 }: {
   checked: boolean
   label: string
   onPress: () => void
-  indicatorType?: 'checkbox' | 'radio'
 }) => {
   const theme = useTheme()
 
   return (
     <TouchableOpacity style={styles.placeholderCheckbox} activeOpacity={0.7} onPress={onPress}>
-      {indicatorType == 'radio'
-        ? (
-            <View
-              style={{
-                ...styles.radioIndicator,
-                borderColor: checked ? theme['c-primary-font-active'] : theme['c-font-label'],
-              }}>
-              {checked
-                ? <View style={{ ...styles.radioIndicatorInner, backgroundColor: theme['c-primary-font-active'] }} />
-                : null}
-            </View>
-          )
-        : (
-            <Icon
-              name={checked ? 'checkbox-marked' : 'checkbox-blank-outline'}
-              size={15}
-              color={checked ? theme['c-primary-font-active'] : theme['c-font-label']}
-            />
-          )}
+      <Icon
+        name={checked ? 'checkbox-marked' : 'checkbox-blank-outline'}
+        size={15}
+        color={checked ? theme['c-primary-font-active'] : theme['c-font-label']}
+      />
       <Text size={13}>{label}</Text>
     </TouchableOpacity>
   )
@@ -345,19 +329,12 @@ const EnvironmentSection = memo(({
         <Text style={styles.sectionTitle}>{t('setting_play_sound_effect_environment')}</Text>
       </View>
       <View style={styles.envList}>
-        <PlaceholderCheckbox
-          checked={!selectedSource}
-          label={t('setting_play_sound_effect_preset_none')}
-          onPress={() => { onToggleConvolution('') }}
-          indicatorType="radio"
-        />
         {soundEffectConvolutionOptions.map(item => (
           <PlaceholderCheckbox
             key={item.id}
             checked={selectedSource == item.source}
             label={t(item.labelKey)}
             onPress={() => { onToggleConvolution(item.source) }}
-            indicatorType="radio"
           />
         ))}
       </View>
@@ -936,19 +913,6 @@ const styles = createStyle({
     marginBottom: 6,
     gap: 3,
   },
-  radioIndicator: {
-    width: 15,
-    height: 15,
-    borderRadius: 8,
-    borderWidth: 1.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  radioIndicatorInner: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-  },
   placeholderGroup: {
     gap: 8,
   },
@@ -998,6 +962,7 @@ const styles = createStyle({
   presetList: {
     flexDirection: 'row',
     flexWrap: 'wrap',
+    alignItems: 'flex-start',
   },
   presetButton: {
     paddingHorizontal: 8,
@@ -1007,9 +972,9 @@ const styles = createStyle({
     marginBottom: 8,
   },
   presetAddButton: {
-    minWidth: 28,
-    height: 26,
+    minWidth: 24,
     paddingHorizontal: 8,
+    paddingVertical: 4,
     marginRight: 8,
     marginBottom: 8,
     borderRadius: 4,
@@ -1019,7 +984,7 @@ const styles = createStyle({
     justifyContent: 'center',
   },
   presetAddText: {
-    lineHeight: 16,
+    lineHeight: 15,
     fontWeight: '600',
   },
   sliderWrap: {
