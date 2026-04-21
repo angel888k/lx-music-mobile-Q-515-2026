@@ -314,6 +314,64 @@ private final class LXSpatialPannerEngine {
     }
 }
 
+private final class LXDynamicsProcessor {
+    private let attackCoeff: Float
+    private let releaseCoeff: Float
+    private var currentGain: Float = 1
+
+    init?(sampleRate: Double) {
+        guard sampleRate > 0 else { return nil }
+        self.attackCoeff = exp(-1 / (0.003 * Float(sampleRate)))
+        self.releaseCoeff = exp(-1 / (0.25 * Float(sampleRate)))
+    }
+
+    func processFrame(_ samples: inout [Float], activeChannels: Int) {
+        guard activeChannels > 0 else { return }
+
+        var peak: Float = 0
+        for channel in 0..<activeChannels {
+            peak = max(peak, abs(samples[channel]))
+        }
+
+        var targetGain: Float = 1
+        if peak > 0.000001 {
+            let levelDb = 20 * log10(peak)
+            if levelDb > -24 {
+                let compressedDb = -24 + (levelDb + 24) / 12
+                let gainDb = compressedDb - levelDb
+                targetGain = pow(10, gainDb / 20)
+            }
+        }
+
+        let coeff = targetGain < currentGain ? attackCoeff : releaseCoeff
+        currentGain = coeff * currentGain + (1 - coeff) * targetGain
+        currentGain = max(0, min(currentGain, 1))
+
+        for channel in 0..<activeChannels {
+            samples[channel] *= currentGain
+        }
+    }
+}
+
+private func withUnsafeMutableChannelPointers<R>(_ channels: inout [[Float]], _ body: (UnsafeMutablePointer<UnsafeMutablePointer<Float>?>) -> R) -> R {
+    var pointers = Array<UnsafeMutablePointer<Float>?>(repeating: nil, count: channels.count)
+
+    func recurse(_ index: Int) -> R {
+        if index >= channels.count {
+            return pointers.withUnsafeMutableBufferPointer { pointerBuffer in
+                body(pointerBuffer.baseAddress!)
+            }
+        }
+
+        return channels[index].withUnsafeMutableBufferPointer { buffer in
+            pointers[index] = buffer.baseAddress
+            return recurse(index + 1)
+        }
+    }
+
+    return recurse(0)
+}
+
 struct LXSoundEffectConfiguration {
     var equalizerEnabled = false
     var gains = LXEqualizerAudioMixController.normalizeGains([])
@@ -387,8 +445,10 @@ final class LXEqualizerAudioMixController {
     private let lock = NSLock()
     private var config = LXSoundEffectConfiguration()
     private var coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
+    private var equalizerHeadroomGain: Float = 1
     private var eqStates: [[LXBiquadState]] = []
     private var convolutionEngine: LXConvolutionEngine?
+    private var dynamicsProcessor: LXDynamicsProcessor?
     private var pitchEngine: LXPhaseVocoderPitchShifter?
     private var pannerEngine: LXSpatialPannerEngine?
     private var sampleRate: Double = 0
@@ -504,8 +564,10 @@ final class LXEqualizerAudioMixController {
         bitsPerChannel = 0
         isFloat = false
         isInterleaved = false
+        equalizerHeadroomGain = 1
         eqStates.removeAll(keepingCapacity: false)
         convolutionEngine = nil
+        dynamicsProcessor = nil
         pitchEngine = nil
         pannerEngine = nil
         coefficients = Array(repeating: LXBiquadCoefficients.bypass, count: lxSoundEffectBandFrequencies.count)
@@ -515,6 +577,7 @@ final class LXEqualizerAudioMixController {
         coefficients = config.hasEqualizer
             ? Self.makeCoefficients(sampleRate: sampleRate, gains: config.gains)
             : Array(repeating: .bypass, count: lxSoundEffectBandFrequencies.count)
+        equalizerHeadroomGain = config.hasEqualizer ? Self.makeHeadroomGain(gains: config.gains) : 1
         eqStates = Array(
             repeating: Array(repeating: LXBiquadState(), count: coefficients.count),
             count: channelsPerFrame
@@ -528,6 +591,7 @@ final class LXEqualizerAudioMixController {
             )
             : nil
 
+        dynamicsProcessor = config.isActive ? LXDynamicsProcessor(sampleRate: sampleRate) : nil
         pitchEngine = config.hasPitchShift ? LXPhaseVocoderPitchShifter(channelCount: channelsPerFrame) : nil
         pannerEngine = config.hasPanner && channelsPerFrame >= 2
             ? LXSpatialPannerEngine(sampleRate: sampleRate, soundR: config.pannerSoundR, speed: config.pannerSpeed)
@@ -687,14 +751,19 @@ final class LXEqualizerAudioMixController {
 
         for channel in 0..<activeChannels {
             let output = processEqualizer(samples[channel], channel: channel)
-            samples[channel] = max(min(output, 1), -1)
+            samples[channel] = output * equalizerHeadroomGain
         }
 
         processPitch(&samples, activeChannels: activeChannels)
 
         processConvolution(&samples, activeChannels: activeChannels)
 
+        processDynamics(&samples, activeChannels: activeChannels)
+
         applyPanner(to: &samples, activeChannels: activeChannels)
+        for channel in 0..<activeChannels {
+            samples[channel] = max(min(samples[channel], 1), -1)
+        }
     }
 
     private func processEqualizer(_ sample: Float, channel: Int) -> Float {
@@ -733,6 +802,11 @@ final class LXEqualizerAudioMixController {
         engine.processFrame(&samples, activeChannels: activeChannels)
     }
 
+    private func processDynamics(_ samples: inout [Float], activeChannels: Int) {
+        guard let processor = dynamicsProcessor else { return }
+        processor.processFrame(&samples, activeChannels: activeChannels)
+    }
+
     private func applyPanner(to samples: inout [Float], activeChannels: Int) {
         guard let engine = pannerEngine else { return }
         engine.processFrame(&samples, activeChannels: activeChannels)
@@ -744,6 +818,14 @@ final class LXEqualizerAudioMixController {
             normalized[index] = index < gains.count ? gains[index] : 0
         }
         return normalized
+    }
+
+    private static func makeHeadroomGain(gains: [Float]) -> Float {
+        let maxPositiveGain = gains.reduce(Float(0)) { partialResult, gain in
+            max(partialResult, gain)
+        }
+        guard maxPositiveGain > 0 else { return 1 }
+        return pow(10, -maxPositiveGain / 20)
     }
 
     private static func makeCoefficients(sampleRate: Double, gains: [Float]) -> [LXBiquadCoefficients] {
@@ -791,6 +873,12 @@ private final class LXFFTConvolution {
     private var historyReal: [[[Float]]]
     private var historyImag: [[[Float]]]
     private var overlaps: [[Float]]
+    private var inputScratchReal: [[Float]]
+    private var inputScratchImag: [[Float]]
+    private var sumScratchReal: [[Float]]
+    private var sumScratchImag: [[Float]]
+    private var outputScratch: [[Float]]
+    private var historyWriteIndex = 0
     private let fftSetup: FFTSetup
     private let log2n: vDSP_Length
 
@@ -830,6 +918,11 @@ private final class LXFFTConvolution {
             count: self.inputChannels
         )
         self.overlaps = Array(repeating: Array(repeating: 0, count: blockSize), count: self.outputChannels)
+        self.inputScratchReal = Array(repeating: Array(repeating: 0, count: fftSize), count: self.inputChannels)
+        self.inputScratchImag = Array(repeating: Array(repeating: 0, count: fftSize), count: self.inputChannels)
+        self.sumScratchReal = Array(repeating: Array(repeating: 0, count: fftSize), count: self.outputChannels)
+        self.sumScratchImag = Array(repeating: Array(repeating: 0, count: fftSize), count: self.outputChannels)
+        self.outputScratch = Array(repeating: Array(repeating: 0, count: blockSize), count: self.outputChannels)
 
         let routeMapping = Self.makeRouteMapping(irChannelCount: irChannels.count, inputChannels: self.inputChannels, outputChannels: self.outputChannels)
         for route in routeMapping {
@@ -854,56 +947,73 @@ private final class LXFFTConvolution {
     }
 
     func processBlock(_ inputBlock: [[Float]]) -> [[Float]] {
-        guard !inputBlock.isEmpty else { return Array(repeating: Array(repeating: 0, count: blockSize), count: outputChannels) }
-
-        let historyIndex = 0
-        for channel in 0..<inputChannels {
-            let source = channel < inputBlock.count ? inputBlock[channel] : Array(repeating: 0, count: blockSize)
-            var real = Array(repeating: Float(0), count: fftSize)
-            real.replaceSubrange(0..<min(source.count, blockSize), with: source.prefix(blockSize))
-            var imag = Array(repeating: Float(0), count: fftSize)
-            Self.performFFT(setup: fftSetup, log2n: log2n, real: &real, imag: &imag, direction: FFTDirection(FFT_FORWARD))
-            historyReal[channel].insert(real, at: historyIndex)
-            historyImag[channel].insert(imag, at: historyIndex)
-            if historyReal[channel].count > partitionCount {
-                historyReal[channel].removeLast()
-                historyImag[channel].removeLast()
+        guard !inputBlock.isEmpty else {
+            for outputChannel in 0..<outputChannels {
+                for index in 0..<blockSize {
+                    outputScratch[outputChannel][index] = 0
+                }
             }
+            return outputScratch
         }
 
-        var outputs = Array(repeating: Array(repeating: Float(0), count: blockSize), count: outputChannels)
+        let currentHistoryIndex = historyWriteIndex
+        for channel in 0..<inputChannels {
+            for index in 0..<fftSize {
+                inputScratchReal[channel][index] = 0
+                inputScratchImag[channel][index] = 0
+            }
+            if channel < inputBlock.count {
+                let source = inputBlock[channel]
+                let copyCount = min(source.count, blockSize)
+                for index in 0..<copyCount {
+                    inputScratchReal[channel][index] = source[index]
+                }
+            }
+            for index in 0..<fftSize {
+                historyReal[channel][currentHistoryIndex][index] = inputScratchReal[channel][index]
+                historyImag[channel][currentHistoryIndex][index] = inputScratchImag[channel][index]
+            }
+            Self.performFFT(setup: fftSetup, log2n: log2n, real: &historyReal[channel][currentHistoryIndex], imag: &historyImag[channel][currentHistoryIndex], direction: FFTDirection(FFT_FORWARD))
+        }
+
         for outputChannel in 0..<outputChannels {
-            var sumReal = Array(repeating: Float(0), count: fftSize)
-            var sumImag = Array(repeating: Float(0), count: fftSize)
+            for index in 0..<fftSize {
+                sumScratchReal[outputChannel][index] = 0
+                sumScratchImag[outputChannel][index] = 0
+            }
 
             for inputChannel in 0..<inputChannels {
                 let routeIndex = outputChannel * inputChannels + inputChannel
                 for partition in 0..<partitionCount {
-                    let inputReal = historyReal[inputChannel][partition]
-                    let inputImag = historyImag[inputChannel][partition]
+                    let historyIndex = (currentHistoryIndex + partitionCount - partition) % partitionCount
+                    let inputReal = historyReal[inputChannel][historyIndex]
+                    let inputImag = historyImag[inputChannel][historyIndex]
                     let filterRealPart = filterReal[routeIndex][partition]
                     let filterImagPart = filterImag[routeIndex][partition]
                     for index in 0..<fftSize {
                         let real = filterRealPart[index] * inputReal[index] - filterImagPart[index] * inputImag[index]
                         let imag = filterRealPart[index] * inputImag[index] + filterImagPart[index] * inputReal[index]
-                        sumReal[index] += real
-                        sumImag[index] += imag
+                        sumScratchReal[outputChannel][index] += real
+                        sumScratchImag[outputChannel][index] += imag
                     }
                 }
             }
 
-            Self.performFFT(setup: fftSetup, log2n: log2n, real: &sumReal, imag: &sumImag, direction: FFTDirection(FFT_INVERSE))
+            Self.performFFT(setup: fftSetup, log2n: log2n, real: &sumScratchReal[outputChannel], imag: &sumScratchImag[outputChannel], direction: FFTDirection(FFT_INVERSE))
             let scale = 1 / Float(fftSize)
             for index in 0..<fftSize {
-                sumReal[index] *= scale
+                sumScratchReal[outputChannel][index] *= scale
             }
 
             for index in 0..<blockSize {
-                outputs[outputChannel][index] = sumReal[index] + overlaps[outputChannel][index]
+                outputScratch[outputChannel][index] = sumScratchReal[outputChannel][index] + overlaps[outputChannel][index]
             }
-            overlaps[outputChannel] = Array(sumReal[blockSize..<fftSize])
+            for index in 0..<blockSize {
+                overlaps[outputChannel][index] = sumScratchReal[outputChannel][blockSize + index]
+            }
         }
-        return outputs
+        historyWriteIndex = (currentHistoryIndex + 1) % partitionCount
+        return outputScratch
     }
 
     private static func makeRouteMapping(irChannelCount: Int, inputChannels: Int, outputChannels: Int) -> [(routeIndex: Int, irChannel: Int)] {
@@ -958,11 +1068,12 @@ private final class LXConvolutionEngine {
     private let blockSize: Int
     private let dryGain: Float
     private let wetGain: Float
-    private let convolution: LXFFTConvolution?
+    private let kernel: LXSharedIRConvolutionBridge?
     private var inputBuffer: [[Float]]
     private var inputFill = 0
     private var outputQueue: [[Float]]
     private var outputReadIndex = 0
+    private var outputFrameCount = 0
 
     init?(config: LXSoundEffectConfiguration, sampleRate: Double, channelCount: Int) {
         let effectiveChannels = max(1, min(channelCount, 2))
@@ -977,14 +1088,20 @@ private final class LXConvolutionEngine {
         self.blockSize = 512
         self.dryGain = config.convolutionMainGain / 10
         self.wetGain = config.convolutionSendGain / 10
-        self.convolution = LXFFTConvolution(
-            irChannels: response,
+        let bridgedChannels = response.map { channel in
+            channel.map { NSNumber(value: $0) }
+        }
+        self.kernel = LXSharedIRConvolutionBridge(
+            irChannels: bridgedChannels,
             inputChannels: effectiveChannels,
             outputChannels: self.outputChannels,
-            blockSize: self.blockSize
+            blockSize: self.blockSize,
+            dryGain: self.dryGain,
+            wetGain: self.wetGain
         )
         self.inputBuffer = Array(repeating: Array(repeating: 0, count: self.blockSize), count: effectiveChannels)
-        self.outputQueue = Array(repeating: [], count: self.outputChannels)
+        self.outputQueue = Array(repeating: Array(repeating: 0, count: self.blockSize), count: self.outputChannels)
+        guard kernel?.isReady() == true else { return nil }
     }
 
     func processFrame(_ samples: inout [Float], activeChannels: Int) {
@@ -1000,14 +1117,14 @@ private final class LXConvolutionEngine {
             inputFill = 0
         }
 
-        if outputReadIndex < outputQueue[0].count {
+        if outputFrameCount > 0 && outputReadIndex < outputFrameCount {
             for channel in 0..<usedChannels {
                 let wet = channel < outputChannels ? outputQueue[channel][outputReadIndex] : 0
                 samples[channel] = wet
             }
             outputReadIndex += 1
-            if outputReadIndex >= outputQueue[0].count {
-                outputQueue = Array(repeating: [], count: outputChannels)
+            if outputReadIndex >= outputFrameCount {
+                outputFrameCount = 0
                 outputReadIndex = 0
             }
         } else {
@@ -1018,16 +1135,26 @@ private final class LXConvolutionEngine {
     }
 
     private func processBufferedBlock() {
-        let dryBlock = inputBuffer
-        let wetBlock = convolution?.processBlock(inputBuffer) ?? Array(repeating: Array(repeating: 0, count: blockSize), count: outputChannels)
-        outputQueue = Array(repeating: Array(repeating: 0, count: blockSize), count: outputChannels)
         outputReadIndex = 0
+        outputFrameCount = blockSize
+
+        guard let kernel else {
+            for channel in 0..<outputChannels {
+                for index in 0..<blockSize {
+                    outputQueue[channel][index] = 0
+                }
+            }
+            return
+        }
+
+        withUnsafeMutableChannelPointers(&inputBuffer) { pointers in
+            kernel.updateDryGain(dryGain, wetGain: wetGain)
+            kernel.processChannels(pointers, frameCount: blockSize, activeChannels: min(channelCount, outputChannels))
+        }
 
         for channel in 0..<outputChannels {
             for index in 0..<blockSize {
-                let dry = channel < dryBlock.count ? dryBlock[channel][index] * dryGain : 0
-                let wet = wetBlock[channel][index] * wetGain
-                outputQueue[channel][index] = max(min(dry + wet, 1), -1)
+                outputQueue[channel][index] = channel < inputBuffer.count ? inputBuffer[channel][index] : 0
             }
         }
     }

@@ -2,6 +2,13 @@
   "equalizerFrequencies": [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000],
   "equalizerQ": 1.41,
   "equalizerBypassThreshold": 0.01,
+  "equalizerHeadroomMode": "maxPositiveGain",
+  "dynamics": {
+    "thresholdDb": -24,
+    "ratio": 12,
+    "attackSeconds": 0.003,
+    "releaseSeconds": 0.25
+  },
   "pitch": {
     "defaultRate": 1,
     "minRate": 0.5,
@@ -13,5 +20,5 @@
     "hopSize": 128,
     "windowScale": 0.8
   },
-  "processingOrder": ["equalizer", "pitch", "convolution", "panner"]
+  "processingOrder": ["equalizer", "pitch", "convolution", "dynamics", "panner"]
 }

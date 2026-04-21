@@ -1,0 +1,25 @@
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface LXSharedIRConvolutionBridge : NSObject
+
+- (instancetype)initWithIRChannels:(NSArray<NSArray<NSNumber *> *> *)irChannels
+                     inputChannels:(NSUInteger)inputChannels
+                    outputChannels:(NSUInteger)outputChannels
+                         blockSize:(NSUInteger)blockSize
+                           dryGain:(float)dryGain
+                           wetGain:(float)wetGain NS_DESIGNATED_INITIALIZER;
+
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
+
+- (BOOL)isReady;
+- (void)updateDryGain:(float)dryGain wetGain:(float)wetGain;
+- (void)processChannels:(float * _Nonnull * _Nonnull)channels
+             frameCount:(NSUInteger)frameCount
+         activeChannels:(NSUInteger)activeChannels;
+
+@end
+
+NS_ASSUME_NONNULL_END

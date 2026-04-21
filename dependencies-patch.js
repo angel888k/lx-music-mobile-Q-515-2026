@@ -5,6 +5,9 @@ const path = require('node:path')
 
 const rootPath = __dirname
 const equalizerAudioMixSwiftSource = fs.readFileSync(path.join(rootPath, 'patches/ios/LXEqualizerAudioMix.swift'), 'utf8')
+const sharedIRKernelSource = fs.readFileSync(path.join(rootPath, 'ios/LxMusicMobile/LXSharedIRConvolutionKernel.hpp'), 'utf8')
+const sharedIRBridgeHeaderSource = fs.readFileSync(path.join(rootPath, 'patches/ios/LXSharedIRConvolutionBridge.h'), 'utf8')
+const sharedIRBridgeSource = fs.readFileSync(path.join(rootPath, 'patches/ios/LXSharedIRConvolutionBridge.mm'), 'utf8')
 
 /**
  * @typedef {{ from: string, to: string }} PatchChange
@@ -538,6 +541,27 @@ private let lxTrackPlayerLifecycleNotification = Notification.Name("LXTrackPlaye
       },
     ],
   },
+  {
+    filePath: 'node_modules/react-native-track-player/react-native-track-player.podspec',
+    changes: [
+      {
+        from: '  s.source_files = "ios/**/*.{h,m,swift}"',
+        to: '  s.source_files = "ios/**/*.{h,m,mm,swift,hpp}"',
+      },
+    ],
+  },
+  {
+    filePath: 'node_modules/react-native-track-player/ios/RNTrackPlayer/Support/RNTrackPlayer-Bridging-Header.h',
+    changes: [
+      {
+        from: `#import <React/RCTConvert.h>
+`,
+        to: `#import <React/RCTConvert.h>
+#import "LXSharedIRConvolutionBridge.h"
+`,
+      },
+    ],
+  },
 ]
 
 const patchFile = async({ filePath, changes }) => {
@@ -673,6 +697,22 @@ const patchSwiftAudioSeek = async() => {
     })
   } catch (err) {
     console.error(`Ensure LXEqualizerAudioMix.swift failed: ${err.message}`)
+  }
+  try {
+    await ensureFileContent({
+      filePath: 'node_modules/react-native-track-player/ios/RNTrackPlayer/LXSharedIRConvolutionKernel.hpp',
+      content: sharedIRKernelSource,
+    })
+    await ensureFileContent({
+      filePath: 'node_modules/react-native-track-player/ios/RNTrackPlayer/LXSharedIRConvolutionBridge.h',
+      content: sharedIRBridgeHeaderSource,
+    })
+    await ensureFileContent({
+      filePath: 'node_modules/react-native-track-player/ios/RNTrackPlayer/LXSharedIRConvolutionBridge.mm',
+      content: sharedIRBridgeSource,
+    })
+  } catch (err) {
+    console.error(`Ensure shared IR bridge failed: ${err.message}`)
   }
   console.log('\nDependencies patch finished.\n')
 })()

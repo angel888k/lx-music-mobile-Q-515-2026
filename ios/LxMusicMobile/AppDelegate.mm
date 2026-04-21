@@ -1192,207 +1192,26 @@ struct LXRealtimePhaseVocoderChannelState {
 
 class LXRealtimeConvolutionProcessor {
 public:
-  static std::vector<std::pair<NSUInteger, NSUInteger>> routeMappingWithIRChannelCount(NSUInteger irChannelCount, NSUInteger inputChannels, NSUInteger outputChannels) {
-    if (inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 4) {
-      return {
-        { 0 * inputChannels + 0, 0 },
-        { 0 * inputChannels + 1, 2 },
-        { 1 * inputChannels + 0, 1 },
-        { 1 * inputChannels + 1, 3 },
-      };
-    }
-    if (outputChannels >= 2 && irChannelCount >= 2 && inputChannels == 1) {
-      return { { 0, 0 }, { 1, 1 } };
-    }
-    if (inputChannels >= 2 && outputChannels >= 2 && irChannelCount >= 2) {
-      return {
-        { 0 * inputChannels + 0, 0 },
-        { 1 * inputChannels + 1, 1 },
-      };
-    }
-    if (inputChannels >= 2 && outputChannels >= 2) {
-      return {
-        { 0 * inputChannels + 0, 0 },
-        { 1 * inputChannels + 1, 0 },
-      };
-    }
-    return { { 0, 0 } };
-  }
-
-  static void performFFTWithSetup(FFTSetup setup, vDSP_Length log2n, std::vector<float> &real, std::vector<float> &imag, FFTDirection direction) {
-    DSPSplitComplex split = {
-      .realp = real.data(),
-      .imagp = imag.data(),
-    };
-    vDSP_fft_zip(setup, &split, 1, log2n, direction);
-  }
-
   LXRealtimeConvolutionProcessor(const LXImpulseResponseData &impulse, NSUInteger inputChannels, NSUInteger outputChannels, float dryGain, float wetGain) {
-    _blockSize = 512;
-    _fftSize = _blockSize * 2;
-    _inputChannels = std::max((NSUInteger)1, inputChannels);
-    _outputChannels = std::max((NSUInteger)1, outputChannels);
-    _dryGain.store(dryGain, std::memory_order_release);
-    _wetGain.store(wetGain, std::memory_order_release);
-
-    size_t impulseLength = 0;
-    for (const auto &channel : impulse.channels) impulseLength = std::max(impulseLength, channel.size());
-    _partitionCount = std::max((NSUInteger)1, (NSUInteger)ceil((double)impulseLength / (double)_blockSize));
-
-    NSUInteger log2Value = (NSUInteger)llround(log2((double)_fftSize));
-    if (((NSUInteger)1 << log2Value) != _fftSize) return;
-    _log2n = (vDSP_Length)log2Value;
-    _fftSetup = vDSP_create_fftsetup(_log2n, FFTRadix(kFFTRadix2));
-    if (_fftSetup == NULL) return;
-
-    NSUInteger routeCount = _inputChannels * _outputChannels;
-    _filterReal.assign(routeCount, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
-    _filterImag.assign(routeCount, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
-    _historyReal.assign(_inputChannels, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
-    _historyImag.assign(_inputChannels, std::vector<std::vector<float>>(_partitionCount, std::vector<float>(_fftSize, 0)));
-    _overlaps.assign(_outputChannels, std::vector<float>(_blockSize, 0));
-    _inputBuffer.assign(_inputChannels, std::vector<float>(_blockSize, 0));
-    _outputQueue.assign(_outputChannels, std::vector<float>());
-
-    auto routeMapping = routeMappingWithIRChannelCount((NSUInteger)impulse.channels.size(), _inputChannels, _outputChannels);
-    for (const auto &route : routeMapping) {
-      const auto &impulseChannel = impulse.channels[std::min((size_t)route.second, impulse.channels.size() - 1)];
-      for (NSUInteger partition = 0; partition < _partitionCount; partition++) {
-        NSUInteger start = partition * _blockSize;
-        NSUInteger end = MIN(start + _blockSize, (NSUInteger)impulseChannel.size());
-        std::vector<float> real(_fftSize, 0);
-        if (start < end) std::copy(impulseChannel.begin() + start, impulseChannel.begin() + end, real.begin());
-        std::vector<float> imag(_fftSize, 0);
-        performFFTWithSetup(_fftSetup, _log2n, real, imag, FFTDirection(FFT_FORWARD));
-        _filterReal[route.first][partition] = std::move(real);
-        _filterImag[route.first][partition] = std::move(imag);
-      }
-    }
-    _isReady = true;
-  }
-
-  ~LXRealtimeConvolutionProcessor() {
-    if (_fftSetup != NULL) vDSP_destroy_fftsetup(_fftSetup);
+    _kernel = std::make_unique<LXSharedDSP::IRConvolutionKernel>(impulse.channels, inputChannels, outputChannels, dryGain, wetGain);
   }
 
   bool isReady() const {
-    return _isReady;
+    return _kernel != nullptr && _kernel->isReady();
   }
 
   void updateDryGain(float dryGain, float wetGain) {
-    _dryGain.store(dryGain, std::memory_order_release);
-    _wetGain.store(wetGain, std::memory_order_release);
+    if (_kernel == nullptr) return;
+    _kernel->updateGains(dryGain, wetGain);
   }
 
   void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels) {
-    if (!_isReady) return;
-    NSUInteger usedChannels = MIN(activeChannels, _inputChannels);
-    if (usedChannels == 0 || channels == NULL) return;
-
-    for (NSUInteger frame = 0; frame < frameCount; frame++) {
-      for (NSUInteger channel = 0; channel < usedChannels; channel++) {
-        _inputBuffer[channel][_inputFill] = channels[channel][frame];
-      }
-      _inputFill += 1;
-      if (_inputFill >= _blockSize) {
-        processBufferedBlock();
-        _inputFill = 0;
-      }
-
-      if (!_outputQueue.empty() && !_outputQueue[0].empty() && _outputReadIndex < _outputQueue[0].size()) {
-        for (NSUInteger channel = 0; channel < usedChannels; channel++) {
-          channels[channel][frame] = channel < _outputChannels ? _outputQueue[channel][_outputReadIndex] : 0;
-        }
-        _outputReadIndex += 1;
-        if (_outputReadIndex >= _outputQueue[0].size()) {
-          _outputQueue.assign(_outputChannels, std::vector<float>());
-          _outputReadIndex = 0;
-        }
-      } else {
-        for (NSUInteger channel = 0; channel < usedChannels; channel++) channels[channel][frame] = 0;
-      }
-    }
+    if (_kernel == nullptr) return;
+    _kernel->processPCMChannels(channels, frameCount, activeChannels);
   }
 
 private:
-  void processBufferedBlock() {
-    std::vector<std::vector<float>> wetOutputs(_outputChannels, std::vector<float>(_blockSize, 0));
-
-    for (NSUInteger inputChannel = 0; inputChannel < _inputChannels; inputChannel++) {
-      std::vector<float> real(_fftSize, 0);
-      std::copy(_inputBuffer[inputChannel].begin(), _inputBuffer[inputChannel].end(), real.begin());
-      std::vector<float> imag(_fftSize, 0);
-      performFFTWithSetup(_fftSetup, _log2n, real, imag, FFTDirection(FFT_FORWARD));
-      _historyReal[inputChannel].insert(_historyReal[inputChannel].begin(), real);
-      _historyImag[inputChannel].insert(_historyImag[inputChannel].begin(), imag);
-      if (_historyReal[inputChannel].size() > _partitionCount) {
-        _historyReal[inputChannel].pop_back();
-        _historyImag[inputChannel].pop_back();
-      }
-    }
-
-    for (NSUInteger outputChannel = 0; outputChannel < _outputChannels; outputChannel++) {
-      std::vector<float> sumReal(_fftSize, 0);
-      std::vector<float> sumImag(_fftSize, 0);
-
-      for (NSUInteger inputChannel = 0; inputChannel < _inputChannels; inputChannel++) {
-        NSUInteger routeIndex = outputChannel * _inputChannels + inputChannel;
-        for (NSUInteger partition = 0; partition < _partitionCount; partition++) {
-          const auto &inputReal = _historyReal[inputChannel][partition];
-          const auto &inputImag = _historyImag[inputChannel][partition];
-          const auto &filterReal = _filterReal[routeIndex][partition];
-          const auto &filterImag = _filterImag[routeIndex][partition];
-          for (NSUInteger index = 0; index < _fftSize; index++) {
-            float real = filterReal[index] * inputReal[index] - filterImag[index] * inputImag[index];
-            float imag = filterReal[index] * inputImag[index] + filterImag[index] * inputReal[index];
-            sumReal[index] += real;
-            sumImag[index] += imag;
-          }
-        }
-      }
-
-      performFFTWithSetup(_fftSetup, _log2n, sumReal, sumImag, FFTDirection(FFT_INVERSE));
-      float scale = 1.0f / (float)_fftSize;
-      for (NSUInteger index = 0; index < _fftSize; index++) sumReal[index] *= scale;
-
-      for (NSUInteger index = 0; index < _blockSize; index++) {
-        wetOutputs[outputChannel][index] = sumReal[index] + _overlaps[outputChannel][index];
-      }
-      _overlaps[outputChannel].assign(sumReal.begin() + _blockSize, sumReal.end());
-    }
-
-    float dryGain = _dryGain.load(std::memory_order_acquire);
-    float wetGain = _wetGain.load(std::memory_order_acquire);
-    _outputQueue.assign(_outputChannels, std::vector<float>(_blockSize, 0));
-    _outputReadIndex = 0;
-    for (NSUInteger outputChannel = 0; outputChannel < _outputChannels; outputChannel++) {
-      for (NSUInteger index = 0; index < _blockSize; index++) {
-        float dry = outputChannel < _inputBuffer.size() ? _inputBuffer[outputChannel][index] * dryGain : 0;
-        float wet = wetOutputs[outputChannel][index] * wetGain;
-        _outputQueue[outputChannel][index] = fmaxf(fminf(dry + wet, 1.0f), -1.0f);
-      }
-    }
-  }
-
-  NSUInteger _blockSize = 0;
-  NSUInteger _fftSize = 0;
-  NSUInteger _partitionCount = 0;
-  NSUInteger _inputChannels = 0;
-  NSUInteger _outputChannels = 0;
-  vDSP_Length _log2n = 0;
-  FFTSetup _fftSetup = NULL;
-  std::vector<std::vector<std::vector<float>>> _filterReal;
-  std::vector<std::vector<std::vector<float>>> _filterImag;
-  std::vector<std::vector<std::vector<float>>> _historyReal;
-  std::vector<std::vector<std::vector<float>>> _historyImag;
-  std::vector<std::vector<float>> _overlaps;
-  std::vector<std::vector<float>> _inputBuffer;
-  std::vector<std::vector<float>> _outputQueue;
-  NSUInteger _inputFill = 0;
-  NSUInteger _outputReadIndex = 0;
-  std::atomic<float> _dryGain { 1.0f };
-  std::atomic<float> _wetGain { 0.0f };
-  bool _isReady = false;
+  std::unique_ptr<LXSharedDSP::IRConvolutionKernel> _kernel;
 };
 
 class LXRealtimeSpatialPannerProcessor {
@@ -1685,6 +1504,7 @@ public:
     _sampleRate = sampleRate;
     _channelCount = std::max((NSUInteger)1, channelCount);
     _coefficients = makeCoefficients(sampleRate, gains);
+    _headroomGain = makeHeadroomGain(gains);
     _states.assign(_channelCount, std::vector<LXBiquadState>(_coefficients.size()));
     _isReady = !_coefficients.empty();
   }
@@ -1711,7 +1531,7 @@ public:
           state.z2 = coeff.b2 * output - coeff.a2 * filtered;
           output = filtered;
         }
-        channels[channel][frame] = fmaxf(fminf(output, 1.0f), -1.0f);
+        channels[channel][frame] = output * _headroomGain;
       }
     }
   }
@@ -1751,10 +1571,120 @@ private:
     return coefficients;
   }
 
+  static float makeHeadroomGain(const std::vector<float> &gains) {
+    float maxPositiveGain = 0.0f;
+    for (float gain : gains) {
+      if (gain > maxPositiveGain) maxPositiveGain = gain;
+    }
+    if (maxPositiveGain <= 0.0f) return 1.0f;
+    return powf(10.0f, -maxPositiveGain / 20.0f);
+  }
+
   double _sampleRate = 0;
   NSUInteger _channelCount = 0;
   std::vector<LXBiquadCoefficients> _coefficients;
   std::vector<std::vector<LXBiquadState>> _states;
+  float _headroomGain = 1.0f;
+  bool _isReady = false;
+};
+
+class LXRealtimeDynamicsProcessor {
+public:
+  explicit LXRealtimeDynamicsProcessor(double sampleRate) {
+    if (sampleRate <= 0) return;
+    _attackCoeff = expf(-1.0f / (0.003f * (float)sampleRate));
+    _releaseCoeff = expf(-1.0f / (0.25f * (float)sampleRate));
+    _isReady = true;
+  }
+
+  bool isReady() const {
+    return _isReady;
+  }
+
+  void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels) {
+    if (!_isReady || channels == NULL || activeChannels == 0) return;
+
+    for (NSUInteger frame = 0; frame < frameCount; frame++) {
+      float peak = 0.0f;
+      for (NSUInteger channel = 0; channel < activeChannels; channel++) {
+        peak = fmaxf(peak, fabsf(channels[channel][frame]));
+      }
+
+      float targetGain = 1.0f;
+      if (peak > 0.000001f) {
+        float levelDb = 20.0f * log10f(peak);
+        if (levelDb > -24.0f) {
+          float compressedDb = -24.0f + (levelDb + 24.0f) / 12.0f;
+          float gainDb = compressedDb - levelDb;
+          targetGain = powf(10.0f, gainDb / 20.0f);
+        }
+      }
+
+      float coeff = targetGain < _currentGain ? _attackCoeff : _releaseCoeff;
+      _currentGain = coeff * _currentGain + (1.0f - coeff) * targetGain;
+      _currentGain = fmaxf(0.0f, fminf(_currentGain, 1.0f));
+
+      for (NSUInteger channel = 0; channel < activeChannels; channel++) {
+        channels[channel][frame] *= _currentGain;
+      }
+    }
+  }
+
+private:
+  float _attackCoeff = 0.0f;
+  float _releaseCoeff = 0.0f;
+  float _currentGain = 1.0f;
+  bool _isReady = false;
+};
+
+class LXRealtimeDynamicsProcessor {
+public:
+  explicit LXRealtimeDynamicsProcessor(double sampleRate) {
+    if (sampleRate <= 0) return;
+    _sampleRate = sampleRate;
+    _attackCoeff = expf(-1.0f / (0.003f * (float)sampleRate));
+    _releaseCoeff = expf(-1.0f / (0.25f * (float)sampleRate));
+    _isReady = true;
+  }
+
+  bool isReady() const {
+    return _isReady;
+  }
+
+  void processPCMChannels(float *const *channels, NSUInteger frameCount, NSUInteger activeChannels) {
+    if (!_isReady || channels == NULL || activeChannels == 0) return;
+
+    for (NSUInteger frame = 0; frame < frameCount; frame++) {
+      float peak = 0.0f;
+      for (NSUInteger channel = 0; channel < activeChannels; channel++) {
+        peak = fmaxf(peak, fabsf(channels[channel][frame]));
+      }
+
+      float targetGain = 1.0f;
+      if (peak > 0.000001f) {
+        float levelDb = 20.0f * log10f(peak);
+        if (levelDb > -24.0f) {
+          float compressedDb = -24.0f + (levelDb + 24.0f) / 12.0f;
+          float gainDb = compressedDb - levelDb;
+          targetGain = powf(10.0f, gainDb / 20.0f);
+        }
+      }
+
+      float coeff = targetGain < _currentGain ? _attackCoeff : _releaseCoeff;
+      _currentGain = coeff * _currentGain + (1.0f - coeff) * targetGain;
+      _currentGain = fmaxf(0.0f, fminf(_currentGain, 1.0f));
+
+      for (NSUInteger channel = 0; channel < activeChannels; channel++) {
+        channels[channel][frame] *= _currentGain;
+      }
+    }
+  }
+
+private:
+  double _sampleRate = 0;
+  float _attackCoeff = 0.0f;
+  float _releaseCoeff = 0.0f;
+  float _currentGain = 1.0f;
   bool _isReady = false;
 };
 
@@ -1955,7 +1885,7 @@ private:
     for (NSUInteger index = 0; index < _blockSize; index++) {
       float dry = outputChannel < _inputBuffer.size() ? _inputBuffer[outputChannel][index] * _dryGain : 0;
       float wet = wetOutputs[outputChannel][index] * _wetGain;
-      _outputQueue[outputChannel][index] = fmaxf(fminf(dry + wet, 1.0f), -1.0f);
+      _outputQueue[outputChannel][index] = dry + wet;
     }
   }
 }
@@ -2456,6 +2386,7 @@ static NSString *LXStreamingFlacDecoderErrorStatusName(FLAC__StreamDecoderErrorS
   std::atomic<int64_t> _renderPlaybackGeneration;
   std::atomic<float> _pitchPlaybackRate;
   std::shared_ptr<LXRealtimeEqualizerProcessor> _realtimeEqualizerProcessor;
+  std::shared_ptr<LXRealtimeDynamicsProcessor> _realtimeDynamicsProcessor;
   std::shared_ptr<LXRealtimeConvolutionProcessor> _realtimeConvolutionProcessor;
   std::shared_ptr<LXRealtimePhaseVocoderPitchShifter> _realtimePitchProcessor;
   std::shared_ptr<LXRealtimeSpatialPannerProcessor> _realtimePannerProcessor;
@@ -2605,6 +2536,7 @@ RCT_EXPORT_MODULE();
 
 - (void)rebuildRealtimeProcessorsLocked {
   std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimeDynamicsProcessor, std::shared_ptr<LXRealtimeDynamicsProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePannerProcessor, std::shared_ptr<LXRealtimeSpatialPannerProcessor>(), std::memory_order_release);
@@ -2685,6 +2617,7 @@ RCT_EXPORT_MODULE();
   self.pannerTimer = nil;
   self.pannerPhase = 0.0f;
   std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimeDynamicsProcessor, std::shared_ptr<LXRealtimeDynamicsProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePannerProcessor, std::shared_ptr<LXRealtimeSpatialPannerProcessor>(), std::memory_order_release);
@@ -2774,6 +2707,23 @@ RCT_EXPORT_MODULE();
   std::atomic_store_explicit(&_realtimePitchProcessor, processor, std::memory_order_release);
 }
 
+- (void)refreshDynamicsProcessorLockedWithActive:(BOOL)active {
+  if (self.sampleRate <= 0 || !active) {
+    std::atomic_store_explicit(&_realtimeDynamicsProcessor, std::shared_ptr<LXRealtimeDynamicsProcessor>(), std::memory_order_release);
+    return;
+  }
+
+  std::shared_ptr<LXRealtimeDynamicsProcessor> processor = std::atomic_load_explicit(&_realtimeDynamicsProcessor, std::memory_order_acquire);
+  if (processor != nullptr) return;
+
+  processor = std::make_shared<LXRealtimeDynamicsProcessor>(self.sampleRate);
+  if (!processor->isReady()) {
+    std::atomic_store_explicit(&_realtimeDynamicsProcessor, std::shared_ptr<LXRealtimeDynamicsProcessor>(), std::memory_order_release);
+    return;
+  }
+  std::atomic_store_explicit(&_realtimeDynamicsProcessor, processor, std::memory_order_release);
+}
+
 - (void)refreshEqualizerEngineLockedWithEnabled:(BOOL)enabled gains:(const std::vector<float> &)gains {
   if (self.sampleRate <= 0 || self.channels == 0 || !enabled) {
     std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
@@ -2845,9 +2795,11 @@ RCT_EXPORT_MODULE();
   float pannerSoundR = LXSoundEffectClampFloatValue(pannerConfig[@"soundR"], 5.0f, 1.0f, 30.0f);
   float pannerSpeed = LXSoundEffectClampFloatValue(pannerConfig[@"speed"], 25.0f, 1.0f, 50.0f);
   float pitchPlaybackRate = LXSoundEffectClampFloatValue(pitchShifterConfig[@"playbackRate"], 1.0f, 0.5f, 1.5f);
+  BOOL hasConvolution = convolutionFileName.length > 0;
+  BOOL hasPitchShift = fabsf(pitchPlaybackRate - 1.0f) >= 0.01f;
   _pitchPlaybackRate.store(pitchPlaybackRate, std::memory_order_release);
   [self refreshEqualizerEngineLockedWithEnabled:enabled gains:equalizerGains];
-  BOOL hasConvolution = convolutionFileName.length > 0;
+  [self refreshDynamicsProcessorLockedWithActive:(enabled || hasConvolution || pannerEnabled || hasPitchShift)];
   BOOL usesTrueConvolution = hasConvolution && [self refreshConvolutionEngineLockedWithAssetUri:convolutionAssetUri fileName:convolutionFileName mainGain:convolutionMainGain sendGain:convolutionSendGain];
   if (!hasConvolution) {
     std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
@@ -2963,6 +2915,7 @@ RCT_EXPORT_MODULE();
   self.engine = nil;
   self.outputFormat = nil;
   std::atomic_store_explicit(&_realtimeEqualizerProcessor, std::shared_ptr<LXRealtimeEqualizerProcessor>(), std::memory_order_release);
+  std::atomic_store_explicit(&_realtimeDynamicsProcessor, std::shared_ptr<LXRealtimeDynamicsProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimeConvolutionProcessor, std::shared_ptr<LXRealtimeConvolutionProcessor>(), std::memory_order_release);
   std::atomic_store_explicit(&_realtimePitchProcessor, std::shared_ptr<LXRealtimePhaseVocoderPitchShifter>(), std::memory_order_release);
   _lastRealtimeEqualizerEnabled = NO;
@@ -3047,9 +3000,20 @@ RCT_EXPORT_MODULE();
       convolutionProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels);
     }
 
+    std::shared_ptr<LXRealtimeDynamicsProcessor> dynamicsProcessor = std::atomic_load_explicit(&_realtimeDynamicsProcessor, std::memory_order_acquire);
+    if (dynamicsProcessor != nullptr) {
+      dynamicsProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels);
+    }
+
     std::shared_ptr<LXRealtimeSpatialPannerProcessor> pannerProcessor = std::atomic_load_explicit(&_realtimePannerProcessor, std::memory_order_acquire);
     if (pannerProcessor != nullptr) {
       pannerProcessor->processPCMChannels(channelPointers, (NSUInteger)framesRead, activeChannels);
+    }
+
+    for (NSUInteger channel = 0; channel < activeChannels; channel++) {
+      for (NSUInteger frame = 0; frame < (NSUInteger)framesRead; frame++) {
+        channelPointers[channel][frame] = fmaxf(fminf(channelPointers[channel][frame], 1.0f), -1.0f);
+      }
     }
   }
 
