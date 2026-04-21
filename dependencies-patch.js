@@ -546,7 +546,7 @@ private let lxTrackPlayerLifecycleNotification = Notification.Name("LXTrackPlaye
     changes: [
       {
         from: '  s.source_files = "ios/**/*.{h,m,swift}"',
-        to: '  s.source_files = "ios/**/*.{h,m,mm,swift,hpp}"',
+        to: '  s.source_files = "ios/**/*.{h,m,mm,swift}"',
       },
     ],
   },
