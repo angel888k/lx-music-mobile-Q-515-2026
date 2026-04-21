@@ -5,7 +5,7 @@
   std::unique_ptr<LXSharedDSP::IRConvolutionKernel> _kernel;
 }
 
-- (instancetype)initWithIRChannels:(NSArray<NSArray<NSNumber *> *> *)irChannels
+- (instancetype)initWithIRChannelData:(NSArray<NSData *> *)irChannelData
                      inputChannels:(NSUInteger)inputChannels
                     outputChannels:(NSUInteger)outputChannels
                          blockSize:(NSUInteger)blockSize
@@ -15,12 +15,15 @@
   if (self == nil) return nil;
 
   std::vector<std::vector<float>> channels;
-  channels.reserve(irChannels.count);
-  for (NSArray<NSNumber *> *channel in irChannels) {
-    std::vector<float> values;
-    values.reserve(channel.count);
-    for (NSNumber *sample in channel) values.push_back(sample.floatValue);
-    channels.push_back(std::move(values));
+  channels.reserve(irChannelData.count);
+  for (NSData *channelData in irChannelData) {
+    NSUInteger sampleCount = channelData.length / sizeof(float);
+    const float *samples = (const float *)channelData.bytes;
+    if (samples == nullptr || sampleCount == 0) {
+      channels.emplace_back();
+      continue;
+    }
+    channels.emplace_back(samples, samples + sampleCount);
   }
 
   _kernel = std::make_unique<LXSharedDSP::IRConvolutionKernel>(channels, inputChannels, outputChannels, dryGain, wetGain, blockSize);

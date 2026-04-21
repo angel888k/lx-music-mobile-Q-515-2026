@@ -464,8 +464,26 @@ private let lxTrackPlayerLifecycleNotification = Notification.Name("LXTrackPlaye
     }
 `,
         to: `    @objc private func handleSoundEffectConfigChanged(_ notification: Notification) {
-        soundEffectConfig = LXSoundEffectConfiguration.fromUserInfo(notification.userInfo)
-        refreshSoundEffectAudioMix()
+        let nextConfig = LXSoundEffectConfiguration.fromUserInfo(notification.userInfo)
+        if Thread.isMainThread {
+            soundEffectConfig = nextConfig
+            refreshSoundEffectAudioMix()
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.soundEffectConfig = nextConfig
+            self?.refreshSoundEffectAudioMix()
+        }
+    }
+
+    private func refreshSoundEffectAudioMixOnMainThread() {
+        if Thread.isMainThread {
+            refreshSoundEffectAudioMix()
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshSoundEffectAudioMix()
+        }
     }
 
     private func refreshSoundEffectAudioMix() {
@@ -618,6 +636,126 @@ private let lxTrackPlayerLifecycleNotification = Notification.Name("LXTrackPlaye
 `,
       },
       {
+        from: `    @objc private func handleSoundEffectConfigChanged(_ notification: Notification) {
+        soundEffectConfig = LXSoundEffectConfiguration.fromUserInfo(notification.userInfo)
+        refreshSoundEffectAudioMix()
+    }
+
+    private func refreshSoundEffectAudioMix() {
+        guard let currentItem = player.currentPlayerItem else {
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        if soundEffectPlayerItem !== currentItem {
+            soundEffectPlayerItem?.audioMix = nil
+        }
+
+        if let processor = soundEffectTapProcessor, soundEffectPlayerItem === currentItem {
+            processor.updateConfig(soundEffectConfig)
+            if soundEffectConfig.isActive {
+                if currentItem.audioMix == nil, let audioMix = processor.makeAudioMix(for: currentItem.asset) {
+                    currentItem.audioMix = audioMix
+                }
+            } else {
+                currentItem.audioMix = nil
+                soundEffectTapProcessor = nil
+                soundEffectPlayerItem = nil
+            }
+            return
+        }
+
+        guard soundEffectConfig.isActive else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        let processor = LXEqualizerAudioMixController(config: soundEffectConfig)
+        guard let audioMix = processor.makeAudioMix(for: currentItem.asset) else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        currentItem.audioMix = audioMix
+        soundEffectPlayerItem = currentItem
+        soundEffectTapProcessor = processor
+    }
+`,
+        to: `    @objc private func handleSoundEffectConfigChanged(_ notification: Notification) {
+        let nextConfig = LXSoundEffectConfiguration.fromUserInfo(notification.userInfo)
+        if Thread.isMainThread {
+            soundEffectConfig = nextConfig
+            refreshSoundEffectAudioMix()
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.soundEffectConfig = nextConfig
+            self?.refreshSoundEffectAudioMix()
+        }
+    }
+
+    private func refreshSoundEffectAudioMixOnMainThread() {
+        if Thread.isMainThread {
+            refreshSoundEffectAudioMix()
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshSoundEffectAudioMix()
+        }
+    }
+
+    private func refreshSoundEffectAudioMix() {
+        guard let currentItem = player.currentPlayerItem else {
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        if soundEffectPlayerItem !== currentItem {
+            soundEffectPlayerItem?.audioMix = nil
+        }
+
+        if let processor = soundEffectTapProcessor, soundEffectPlayerItem === currentItem {
+            processor.updateConfig(soundEffectConfig)
+            if soundEffectConfig.isActive {
+                if currentItem.audioMix == nil, let audioMix = processor.makeAudioMix(for: currentItem.asset) {
+                    currentItem.audioMix = audioMix
+                }
+            } else {
+                currentItem.audioMix = nil
+                soundEffectTapProcessor = nil
+                soundEffectPlayerItem = nil
+            }
+            return
+        }
+
+        guard soundEffectConfig.isActive else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        let processor = LXEqualizerAudioMixController(config: soundEffectConfig)
+        guard let audioMix = processor.makeAudioMix(for: currentItem.asset) else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        currentItem.audioMix = audioMix
+        soundEffectPlayerItem = currentItem
+        soundEffectTapProcessor = processor
+    }
+`,
+      },
+      {
         from: `    func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
         refreshEqualizerAudioMix()
         sendEvent(withName: "playback-state", body: ["state": state.rawValue])
@@ -625,7 +763,7 @@ private let lxTrackPlayerLifecycleNotification = Notification.Name("LXTrackPlaye
     }
 `,
         to: `    func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
-        refreshSoundEffectAudioMix()
+        refreshSoundEffectAudioMixOnMainThread()
         sendEvent(withName: "playback-state", body: ["state": state.rawValue])
         postLifecycleEvent("state", state: state)
     }
@@ -637,7 +775,31 @@ private let lxTrackPlayerLifecycleNotification = Notification.Name("LXTrackPlaye
         var dictionary: [String: Any] = [ "position": player.currentTime ]
 `,
         to: `    func handleAudioPlayerQueueIndexChange(previousIndex: Int?, nextIndex: Int?) {
+        refreshSoundEffectAudioMixOnMainThread()
+        var dictionary: [String: Any] = [ "position": player.currentTime ]
+`,
+      },
+      {
+        from: `    func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
         refreshSoundEffectAudioMix()
+        sendEvent(withName: "playback-state", body: ["state": state.rawValue])
+        postLifecycleEvent("state", state: state)
+    }
+`,
+        to: `    func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
+        refreshSoundEffectAudioMixOnMainThread()
+        sendEvent(withName: "playback-state", body: ["state": state.rawValue])
+        postLifecycleEvent("state", state: state)
+    }
+`,
+      },
+      {
+        from: `    func handleAudioPlayerQueueIndexChange(previousIndex: Int?, nextIndex: Int?) {
+        refreshSoundEffectAudioMix()
+        var dictionary: [String: Any] = [ "position": player.currentTime ]
+`,
+        to: `    func handleAudioPlayerQueueIndexChange(previousIndex: Int?, nextIndex: Int?) {
+        refreshSoundEffectAudioMixOnMainThread()
         var dictionary: [String: Any] = [ "position": player.currentTime ]
 `,
       },
@@ -779,6 +941,102 @@ const patchSwiftAudioSeek = async() => {
   })
 }
 
+const patchTrackPlayerSoundEffectRefresh = async() => {
+  const filePath = 'node_modules/react-native-track-player/ios/RNTrackPlayer/RNTrackPlayer.swift'
+
+  await patchFileByRegex({
+    filePath,
+    pattern: /@objc private func handleSoundEffectConfigChanged\(_ notification: Notification\) \{[\s\S]*?\n\s{4}\/\/ MARK: - QueuedAudioPlayer Event Handlers/,
+    replacement: `@objc private func handleSoundEffectConfigChanged(_ notification: Notification) {
+        let nextConfig = LXSoundEffectConfiguration.fromUserInfo(notification.userInfo)
+        if Thread.isMainThread {
+            soundEffectConfig = nextConfig
+            refreshSoundEffectAudioMix()
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.soundEffectConfig = nextConfig
+            self?.refreshSoundEffectAudioMix()
+        }
+    }
+
+    private func refreshSoundEffectAudioMixOnMainThread() {
+        if Thread.isMainThread {
+            refreshSoundEffectAudioMix()
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshSoundEffectAudioMix()
+        }
+    }
+
+    private func refreshSoundEffectAudioMix() {
+        guard let currentItem = player.currentPlayerItem else {
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        if soundEffectPlayerItem !== currentItem {
+            soundEffectPlayerItem?.audioMix = nil
+        }
+
+        if let processor = soundEffectTapProcessor, soundEffectPlayerItem === currentItem {
+            processor.updateConfig(soundEffectConfig)
+            if soundEffectConfig.isActive {
+                if currentItem.audioMix == nil, let audioMix = processor.makeAudioMix(for: currentItem.asset) {
+                    currentItem.audioMix = audioMix
+                }
+            } else {
+                currentItem.audioMix = nil
+                soundEffectTapProcessor = nil
+                soundEffectPlayerItem = nil
+            }
+            return
+        }
+
+        guard soundEffectConfig.isActive else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        let processor = LXEqualizerAudioMixController(config: soundEffectConfig)
+        guard let audioMix = processor.makeAudioMix(for: currentItem.asset) else {
+            currentItem.audioMix = nil
+            soundEffectPlayerItem = nil
+            soundEffectTapProcessor = nil
+            return
+        }
+
+        currentItem.audioMix = audioMix
+        soundEffectPlayerItem = currentItem
+        soundEffectTapProcessor = processor
+    }
+
+    // MARK: - QueuedAudioPlayer Event Handlers`,
+  })
+
+  await patchFileByRegex({
+    filePath,
+    pattern: /func handleAudioPlayerStateChange\(state: AVPlayerWrapperState\) \{[\s\S]*?\n\s{4}\}/,
+    replacement: `func handleAudioPlayerStateChange(state: AVPlayerWrapperState) {
+        refreshSoundEffectAudioMixOnMainThread()
+        sendEvent(withName: "playback-state", body: ["state": state.rawValue])
+        postLifecycleEvent("state", state: state)
+    }`,
+  })
+
+  await patchFileByRegex({
+    filePath,
+    pattern: /func handleAudioPlayerQueueIndexChange\(previousIndex: Int\?, nextIndex: Int\?\) \{[\s\S]*?\n\s{8}var dictionary: \[String: Any\] = \[ "position": player.currentTime \]/,
+    replacement: `func handleAudioPlayerQueueIndexChange(previousIndex: Int?, nextIndex: Int?) {
+        refreshSoundEffectAudioMixOnMainThread()
+        var dictionary: [String: Any] = [ "position": player.currentTime ]`,
+  })
+}
+
 ;(async() => {
   for (const target of patchTargets) {
     try {
@@ -791,6 +1049,11 @@ const patchSwiftAudioSeek = async() => {
     await patchSwiftAudioSeek()
   } catch (err) {
     console.error(`Patch SwiftAudio seek failed: ${err.message}`)
+  }
+  try {
+    await patchTrackPlayerSoundEffectRefresh()
+  } catch (err) {
+    console.error(`Patch TrackPlayer sound effect refresh failed: ${err.message}`)
   }
   try {
     await ensureFileContent({

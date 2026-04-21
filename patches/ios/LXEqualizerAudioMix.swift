@@ -291,8 +291,7 @@ private final class LXSpatialPannerEngine {
         let x = sin(angle) * soundR
         let y = cos(angle) * soundR
         let z = cos(angle) * soundR
-        let distance = sqrt(x * x + y * y + z * z)
-        let attenuation = 1 / (1 + 0.18 * distance)
+        let attenuation: Float = 1
         let normalizedX = max(-1, min(1, x / max(soundR, 0.0001)))
         let leftGain = attenuation * sqrt(0.5 * (1 - normalizedX))
         let rightGain = attenuation * sqrt(0.5 * (1 + normalizedX))
@@ -317,13 +316,13 @@ private final class LXSpatialPannerEngine {
 private final class LXDynamicsProcessor {
     private let attackCoeff: Float
     private let releaseCoeff: Float
-    private let makeupRatio: Float = 0.6
+    private let limiterThreshold: Float = 0.98
     private var currentGain: Float = 1
 
     init?(sampleRate: Double) {
         guard sampleRate > 0 else { return nil }
-        self.attackCoeff = exp(-1 / (0.003 * Float(sampleRate)))
-        self.releaseCoeff = exp(-1 / (0.25 * Float(sampleRate)))
+        self.attackCoeff = exp(-1 / (0.001 * Float(sampleRate)))
+        self.releaseCoeff = exp(-1 / (0.08 * Float(sampleRate)))
     }
 
     func processFrame(_ samples: inout [Float], activeChannels: Int) {
@@ -335,25 +334,16 @@ private final class LXDynamicsProcessor {
         }
 
         var targetGain: Float = 1
-        if peak > 0.000001 {
-            let levelDb = 20 * log10(peak)
-            if levelDb > -24 {
-                let compressedDb = -24 + (levelDb + 24) / 12
-                let gainDb = compressedDb - levelDb
-                targetGain = pow(10, gainDb / 20)
-            }
+        if peak > limiterThreshold {
+            targetGain = limiterThreshold / peak
         }
 
         let coeff = targetGain < currentGain ? attackCoeff : releaseCoeff
         currentGain = coeff * currentGain + (1 - coeff) * targetGain
         currentGain = max(0, min(currentGain, 1))
-        let safeGain = max(currentGain, 0.000001)
-        let reductionDb = -20 * log10(safeGain)
-        let makeupGain = pow(10, (reductionDb * makeupRatio) / 20)
-        let outputGain = min(makeupGain * currentGain, 1)
 
         for channel in 0..<activeChannels {
-            samples[channel] *= outputGain
+            samples[channel] *= currentGain
         }
     }
 }
@@ -903,13 +893,8 @@ final class LXEqualizerAudioMixController {
     }
 
     private static func makeHeadroomGain(gains: [Float]) -> Float {
-        let maxPositiveGain = gains.reduce(Float(0)) { partialResult, gain in
-            max(partialResult, gain)
-        }
-        let thresholdDb: Float = 6
-        let ratio: Float = 2
-        guard maxPositiveGain > thresholdDb else { return 1 }
-        return pow(10, -(maxPositiveGain - thresholdDb) / (20 * ratio))
+        _ = gains
+        return 1
     }
 
     private static func makeCoefficients(sampleRate: Double, gains: [Float]) -> [LXBiquadCoefficients] {
@@ -1178,10 +1163,13 @@ private final class LXConvolutionEngine {
         self.dryGain = config.convolutionMainGain / 10
         self.wetGain = config.convolutionSendGain / 10
         let bridgedChannels = response.map { channel in
-            channel.map { NSNumber(value: $0) }
+            channel.withUnsafeBufferPointer { buffer in
+                guard let baseAddress = buffer.baseAddress else { return Data() }
+                return Data(bytes: baseAddress, count: buffer.count * MemoryLayout<Float>.stride)
+            }
         }
         self.kernel = LXSharedIRConvolutionBridge(
-            irChannels: bridgedChannels,
+            irChannelData: bridgedChannels,
             inputChannels: UInt(effectiveChannels),
             outputChannels: UInt(self.outputChannels),
             blockSize: UInt(self.blockSize),
@@ -1253,11 +1241,17 @@ private final class LXConvolutionEngine {
         }
 
         let activeChannels = min(channelCount, outputChannels)
-        inputBuffer[0].withUnsafeMutableBufferPointer { channel0 in
+        var processedChannel0 = inputBuffer[0]
+        var processedChannel1 = activeChannels > 1
+            ? inputBuffer[1]
+            : Array(repeating: Float(0), count: blockSize)
+
+        processedChannel0.withUnsafeMutableBufferPointer { channel0 in
+            guard let channel0Base = channel0.baseAddress else { return }
             if activeChannels > 1 {
-                inputBuffer[1].withUnsafeMutableBufferPointer { channel1 in
+                processedChannel1.withUnsafeMutableBufferPointer { channel1 in
                     kernel.processStereoChannel0(
-                        channel0.baseAddress!,
+                        channel0Base,
                         channel1: channel1.baseAddress,
                         frameCount: UInt(blockSize),
                         activeChannels: UInt(activeChannels)
@@ -1265,7 +1259,7 @@ private final class LXConvolutionEngine {
                 }
             } else {
                 kernel.processStereoChannel0(
-                    channel0.baseAddress!,
+                    channel0Base,
                     channel1: nil,
                     frameCount: UInt(blockSize),
                     activeChannels: UInt(activeChannels)
@@ -1273,10 +1267,9 @@ private final class LXConvolutionEngine {
             }
         }
 
-        for channel in 0..<outputChannels {
-            for index in 0..<blockSize {
-                outputQueue[channel][index] = channel < inputBuffer.count ? inputBuffer[channel][index] : 0
-            }
+        outputQueue[0] = processedChannel0
+        if outputChannels > 1 {
+            outputQueue[1] = processedChannel1
         }
     }
 

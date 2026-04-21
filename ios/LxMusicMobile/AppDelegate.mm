@@ -1573,14 +1573,8 @@ private:
   }
 
   static float makeHeadroomGain(const std::vector<float> &gains) {
-    float maxPositiveGain = 0.0f;
-    for (float gain : gains) {
-      if (gain > maxPositiveGain) maxPositiveGain = gain;
-    }
-    const float thresholdDb = 6.0f;
-    const float ratio = 2.0f;
-    if (maxPositiveGain <= thresholdDb) return 1.0f;
-    return powf(10.0f, -(maxPositiveGain - thresholdDb) / (20.0f * ratio));
+    (void)gains;
+    return 1.0f;
   }
 
   double _sampleRate = 0;
@@ -1595,8 +1589,8 @@ class LXRealtimeDynamicsProcessor {
 public:
   explicit LXRealtimeDynamicsProcessor(double sampleRate) {
     if (sampleRate <= 0) return;
-    _attackCoeff = expf(-1.0f / (0.003f * (float)sampleRate));
-    _releaseCoeff = expf(-1.0f / (0.25f * (float)sampleRate));
+    _attackCoeff = expf(-1.0f / (0.001f * (float)sampleRate));
+    _releaseCoeff = expf(-1.0f / (0.08f * (float)sampleRate));
     _isReady = true;
   }
 
@@ -1614,25 +1608,16 @@ public:
       }
 
       float targetGain = 1.0f;
-      if (peak > 0.000001f) {
-        float levelDb = 20.0f * log10f(peak);
-        if (levelDb > -24.0f) {
-          float compressedDb = -24.0f + (levelDb + 24.0f) / 12.0f;
-          float gainDb = compressedDb - levelDb;
-          targetGain = powf(10.0f, gainDb / 20.0f);
-        }
+      if (peak > _limiterThreshold) {
+        targetGain = _limiterThreshold / peak;
       }
 
       float coeff = targetGain < _currentGain ? _attackCoeff : _releaseCoeff;
       _currentGain = coeff * _currentGain + (1.0f - coeff) * targetGain;
       _currentGain = fmaxf(0.0f, fminf(_currentGain, 1.0f));
-      float safeGain = fmaxf(_currentGain, 0.000001f);
-      float reductionDb = -20.0f * log10f(safeGain);
-      float makeupGain = powf(10.0f, (reductionDb * _makeupRatio) / 20.0f);
-      float outputGain = fminf(makeupGain * _currentGain, 1.0f);
 
       for (NSUInteger channel = 0; channel < activeChannels; channel++) {
-        channels[channel][frame] *= outputGain;
+        channels[channel][frame] *= _currentGain;
       }
     }
   }
@@ -1640,7 +1625,7 @@ public:
 private:
   float _attackCoeff = 0.0f;
   float _releaseCoeff = 0.0f;
-  float _makeupRatio = 0.6f;
+  float _limiterThreshold = 0.98f;
   float _currentGain = 1.0f;
   bool _isReady = false;
 };
@@ -1932,8 +1917,7 @@ struct LXStreamingPannerDelayLine {
     float x = sinf(angle) * _soundR;
     float y = cosf(angle) * _soundR;
     float z = cosf(angle) * _soundR;
-    float distance = sqrtf(x * x + y * y + z * z);
-    float attenuation = 1.0f / (1.0f + 0.18f * distance);
+    float attenuation = 1.0f;
     float normalizedX = fmaxf(-1.0f, fminf(1.0f, x / fmaxf(_soundR, 0.0001f)));
     float leftGain = attenuation * sqrtf(0.5f * (1.0f - normalizedX));
     float rightGain = attenuation * sqrtf(0.5f * (1.0f + normalizedX));

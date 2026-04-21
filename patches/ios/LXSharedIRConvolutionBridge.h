@@ -4,7 +4,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface LXSharedIRConvolutionBridge : NSObject
 
-- (instancetype)initWithIRChannels:(NSArray<NSArray<NSNumber *> *> *)irChannels
+- (instancetype)initWithIRChannelData:(NSArray<NSData *> *)irChannelData
                      inputChannels:(NSUInteger)inputChannels
                     outputChannels:(NSUInteger)outputChannels
                          blockSize:(NSUInteger)blockSize
