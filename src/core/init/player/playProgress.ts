@@ -27,6 +27,13 @@ export default () => {
 
   let isScreenOn = true
 
+  const isRestoringCurrentMusic = () => {
+    const restorePlayInfo = global.lx.restorePlayInfo
+    if (!restorePlayInfo) return false
+    return restorePlayInfo.listId == playerState.playMusicInfo.listId &&
+      restorePlayInfo.index == playerState.playInfo.playIndex
+  }
+
   const getCurrentTime = () => {
     let id = playerState.musicInfo.id
     void getPosition().then(position => {
@@ -124,6 +131,8 @@ export default () => {
     // void setCurrentTime(playerState.progress.nowPlayTime)
     // setMaxplayTime(playProgress.maxPlayTime)
     handlePause()
+    // Skip the startup restore transition so we don't overwrite saved progress with 0.
+    if (isRestoringCurrentMusic()) return
     if (!playerState.playMusicInfo.isTempPlay) {
       void savePlayInfo({
         time: playerState.progress.nowPlayTime,

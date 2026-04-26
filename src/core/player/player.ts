@@ -2,6 +2,7 @@ import { isInitialized, initial as playerInitial, isEmpty, setPause, setPlay, se
 import {
   setStatusText,
 } from '@/core/player/playStatus'
+import { setProgress as updatePlayProgress } from '@/core/player/progress'
 import playerState from '@/store/player/state'
 import settingState from '@/store/setting/state'
 import {
@@ -174,9 +175,10 @@ const handleRestorePlay = async(restorePlayInfo: LX.Player.SavedPlayInfo) => {
   const musicInfo = playerState.playMusicInfo.musicInfo
   if (!musicInfo) return
 
-  setTimeout(() => {
-    global.app_event.setProgress(settingState.setting['player.isSavePlayTime'] ? restorePlayInfo.time : 0, restorePlayInfo.maxTime)
-  })
+  // Avoid seeking the 2-second placeholder track during startup restore.
+  const restoreTime = settingState.setting['player.isSavePlayTime'] ? restorePlayInfo.time : 0
+  updatePlayProgress(restoreTime, restorePlayInfo.maxTime)
+  global.app_event.seekLyric(restoreTime)
 
   const playMusicInfo = playerState.playMusicInfo
 
