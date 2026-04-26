@@ -69,4 +69,5 @@ export {
 
 export {
   getStatus,
+  hasClientConnection,
 } from './client'

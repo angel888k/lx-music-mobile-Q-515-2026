@@ -284,4 +284,9 @@ export const disconnect = async() => {
   heartbeatTools.failedNum = 0
 }
 
+export const hasClientConnection = () => {
+  if (!client) return false
+  return client.readyState === 0 || client.readyState === 1
+}
+
 export const getStatus = (): LX.Sync.Status => status

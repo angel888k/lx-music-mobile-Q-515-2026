@@ -4,4 +4,5 @@ export {
   connectServer,
   disconnectServer,
   getStatus,
+  hasClientConnection,
 } from './client'
