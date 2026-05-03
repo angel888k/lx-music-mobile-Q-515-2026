@@ -422,7 +422,7 @@ static NSString *LXSHA1(NSString *value) {
 static NSString *LXJSONString(id value) {
   if (value == nil || value == (id)kCFNull) return nil;
   if ([value isKindOfClass:[NSString class]]) return value;
-  NSData *data = [NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
+  NSData *data = [NSJSONSerialization dataWithJSONObject:value options:NSJSONWritingFragmentsAllowed error:nil];
   if (!data) return nil;
   return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
