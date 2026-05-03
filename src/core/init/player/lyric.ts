@@ -6,6 +6,7 @@ import { updateNowPlayingTitles } from '@/plugins/player/utils'
 import { updateMetaData } from '@/plugins/player'
 import { setLastLyric } from '@/core/player/playInfo'
 import { Platform } from 'react-native'
+import settingState from '@/store/setting/state'
 
 const updateRemoteLyric = async(lrc?: string) => {
   setLastLyric(lrc)
@@ -62,7 +63,7 @@ export default async(setting: LX.AppSetting) => {
       if (lyric === prevLyric) return
       prevLyric = lyric
       void updateRemoteLyric(lyric)
-      if (playerState.playMusicInfo.musicInfo) {
+      if (settingState.setting['player.isShowBluetoothLyric'] && playerState.playMusicInfo.musicInfo) {
         void updateMetaData(playerState.musicInfo, playerState.isPlay, lyric, true)
       }
     })

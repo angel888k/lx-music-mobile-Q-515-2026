@@ -9,6 +9,8 @@ import {
 import {
   clearTracks,
   ensureCurrentTrackMetadata,
+  formatMusicInfo,
+  getCurrentFullLyric,
   loadTrackPlayerResource,
 } from '../trackPlayerCore'
 
@@ -41,16 +43,16 @@ export const loadPlaybackResource = async({
       })
       clearTracks()
       const playbackInfo = await startNativeFlacPlayback(musicInfo, url, time, shouldAutoStart, quality ?? null)
+      const mInfo = formatMusicInfo(musicInfo)
       global.lx.playerTrackId = getNativeFlacTrackId()
       ensureCurrentTrackMetadata({
-        title: ('progress' in musicInfo ? musicInfo.metadata.musicInfo.name : musicInfo.name) ?? 'Unknow',
-        artist: ('progress' in musicInfo ? musicInfo.metadata.musicInfo.singer : musicInfo.singer) ?? 'Unknow',
-        album: ('progress' in musicInfo ? musicInfo.metadata.musicInfo.meta.albumName : musicInfo.meta.albumName) ?? undefined,
-        artwork: 'progress' in musicInfo
-          ? (typeof musicInfo.metadata.musicInfo.meta.picUrl == 'string' ? musicInfo.metadata.musicInfo.meta.picUrl : undefined)
-          : (typeof musicInfo.meta.picUrl == 'string' ? musicInfo.meta.picUrl : undefined),
+        title: mInfo.name ?? 'Unknow',
+        artist: mInfo.singer ?? 'Unknow',
+        album: mInfo.album ?? undefined,
+        artwork: typeof mInfo.pic == 'string' ? mInfo.pic : undefined,
         duration: playbackInfo.duration,
         elapsedTime: playbackInfo.position,
+        lyric: getCurrentFullLyric(mInfo.id),
       })
       return
     } finally {

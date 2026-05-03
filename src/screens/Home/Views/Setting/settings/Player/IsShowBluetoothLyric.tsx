@@ -2,7 +2,7 @@ import { updateSetting } from '@/core/common'
 import { useI18n } from '@/lang'
 import { createStyle, remoteLyricTip } from '@/utils/tools'
 import { memo } from 'react'
-import { View } from 'react-native'
+import { Platform, View } from 'react-native'
 import { useSettingValue } from '@/store/setting/hook'
 
 
@@ -11,6 +11,7 @@ import { showRemoteLyric } from '@/core/desktopLyric'
 import { setLastLyric } from '@/core/player/playInfo'
 import { updateNowPlayingTitles } from '@/plugins/player/utils'
 import playerState from '@/store/player/state'
+import { syncNowPlayingMetadata } from '@/core/player/nowPlaying'
 
 export default memo(() => {
   const t = useI18n()
@@ -20,6 +21,11 @@ export default memo(() => {
       await remoteLyricTip()
     }
     updateSetting({ 'player.isShowBluetoothLyric': isShowBluetoothLyric })
+    if (Platform.OS == 'ios') {
+      if (!isShowBluetoothLyric) setLastLyric()
+      syncNowPlayingMetadata(true)
+      return
+    }
     void showRemoteLyric(isShowBluetoothLyric)
     if (!isShowBluetoothLyric) {
       setLastLyric()

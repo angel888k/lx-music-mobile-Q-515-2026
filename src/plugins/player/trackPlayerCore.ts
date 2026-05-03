@@ -62,7 +62,7 @@ export const formatMusicInfo = (musicInfo: LX.Player.PlayMusic) => {
   }
 }
 
-const getCurrentFullLyric = (targetId: string | null) => {
+export const getCurrentFullLyric = (targetId: string | null) => {
   return (settingState.setting['player.isShowBluetoothFullLyric'] && targetId &&
       playerState.musicInfo.id == targetId && playerState.musicInfo.lrc)
     ? playerState.musicInfo.lrc

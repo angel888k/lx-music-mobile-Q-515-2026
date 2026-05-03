@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-argument -- Bridge payloads are validated at runtime before being exposed to the app. */
 import { aesEncryptSync, AES_MODE, rsaEncryptSync, RSA_PADDING } from '@/utils/nativeModules/crypto'
 import { stringMd5 } from 'react-native-quick-md5'
 
@@ -156,14 +157,14 @@ class UserApiFallbackRuntime {
       this.emitLog(type, text)
     }
     return {
-      log: (...args: any[]) => send('log', args),
-      info: (...args: any[]) => send('info', args),
-      warn: (...args: any[]) => send('warn', args),
-      error: (...args: any[]) => send('error', args),
+      log: (...args: any[]) => { send('log', args) },
+      info: (...args: any[]) => { send('info', args) },
+      warn: (...args: any[]) => { send('warn', args) },
+      error: (...args: any[]) => { send('error', args) },
     }
   }
 
-  private setTimer = (callback: (...args: any[]) => void, timeout = 0, ...args: any[]) => {
+  private readonly setTimer = (callback: (...args: unknown[]) => void, timeout = 0, ...args: unknown[]) => {
     const id = this.timeoutId++
     const handle = setTimeout(() => {
       this.timeoutHandles.delete(id)
@@ -173,7 +174,7 @@ class UserApiFallbackRuntime {
     return id
   }
 
-  private clearTimer = (id: number) => {
+  private readonly clearTimer = (id: number) => {
     const handle = this.timeoutHandles.get(id)
     if (!handle) return
     clearTimeout(handle)
@@ -263,7 +264,7 @@ class UserApiFallbackRuntime {
     }
   }
 
-  private handleScriptRequest = async(eventData: { requestKey: string, data: any }) => {
+  private readonly handleScriptRequest = async(eventData: { requestKey: string, data: any }) => {
     if (!this.requestHandler) {
       emit({
         action: 'response',
@@ -377,42 +378,37 @@ class UserApiFallbackRuntime {
           })
         }
       },
-      send: (eventName: string, data: any) => {
-        return new Promise<void>((resolve, reject) => {
-          switch (eventName) {
-            case EVENT_NAMES.inited:
-              if (this.isInited) return reject(new Error('Script is inited'))
-              this.isInited = true
-              try {
-                this.emitInit(true, this.buildSourceInfo(data))
-                resolve()
-              } catch (error: any) {
-                this.emitInit(false, null, error?.message ?? 'Init failed')
-                reject(error)
-              }
-              break
-            case EVENT_NAMES.updateAlert:
-              if (this.isShowedUpdateAlert) return reject(new Error('The update alert can only be called once.'))
-              this.isShowedUpdateAlert = true
-              emit({
-                action: 'showUpdateAlert',
-                data: {
-                  name: this.info.name,
-                  log: String(data?.log ?? ''),
-                  updateUrl: typeof data?.updateUrl == 'string' ? data.updateUrl : '',
-                },
-              })
-              resolve()
-              break
-            default:
-              reject(new Error(`The event is not supported: ${eventName}`))
-          }
-        })
+      send: async(eventName: string, data: any) => {
+        switch (eventName) {
+          case EVENT_NAMES.inited:
+            if (this.isInited) throw new Error('Script is inited')
+            this.isInited = true
+            try {
+              this.emitInit(true, this.buildSourceInfo(data))
+            } catch (error: any) {
+              this.emitInit(false, null, error?.message ?? 'Init failed')
+              throw error
+            }
+            return
+          case EVENT_NAMES.updateAlert:
+            if (this.isShowedUpdateAlert) throw new Error('The update alert can only be called once.')
+            this.isShowedUpdateAlert = true
+            emit({
+              action: 'showUpdateAlert',
+              data: {
+                name: this.info.name,
+                log: String(data?.log ?? ''),
+                updateUrl: typeof data?.updateUrl == 'string' ? data.updateUrl : '',
+              },
+            })
+            return
+          default:
+            throw new Error(`The event is not supported: ${eventName}`)
+        }
       },
-      on: (eventName: string, handler: ScriptRequestHandler) => {
-        if (eventName != EVENT_NAMES.request) return Promise.reject(new Error(`The event is not supported: ${eventName}`))
+      on: async(eventName: string, handler: ScriptRequestHandler) => {
+        if (eventName != EVENT_NAMES.request) throw new Error(`The event is not supported: ${eventName}`)
         this.requestHandler = handler
-        return Promise.resolve()
       },
       utils: this.buildUtils(),
       currentScriptInfo: {
@@ -447,6 +443,7 @@ class UserApiFallbackRuntime {
     sandboxGlobal.eval = blockedEval
 
     try {
+      // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
       const runner = new Function(
         'globalThis',
         'window',

@@ -2,6 +2,7 @@ import { NativeModules, NativeEventEmitter, Platform } from 'react-native'
 
 const { LyricModule } = NativeModules
 export const isDesktopLyricSupported = Platform.OS == 'android' && !!LyricModule
+export const isBluetoothLyricSupported = Platform.OS == 'ios' || isDesktopLyricSupported
 const unsupportedError = new Error('Desktop lyric is not supported on this platform')
 
 // export const themes = [

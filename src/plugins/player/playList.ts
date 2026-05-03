@@ -10,6 +10,7 @@ import playerState from '@/store/player/state'
 import { getTimelineDuration } from '@/core/player/timeline'
 import {
   formatNowPlayingTitleLine,
+  getCurrentFullLyric,
   getCurrentTrack,
   getTrackDuration,
   initTrackInfo as handleInitTrackInfo,
@@ -97,14 +98,16 @@ const updateMetaInfo = async(mInfo: LX.Player.MusicInfo, lyric?: string, isPlayi
   // console.log('+++++updateMetaInfo+++++', mInfo.name)
   state.isPlaying = isPlaying
   let artwork = isShowNotificationImage ? mInfo.pic ?? undefined : undefined
+  const fullLyric = getCurrentFullLyric(mInfo.id)
+  const shouldShowBluetoothLyric = settingState.setting['player.isShowBluetoothLyric'] && state.isPlaying && lyric != null
   let name: string
   let singer: string
   let album: string | undefined
   if (Platform.OS == 'ios') {
     name = formatNowPlayingTitleLine(mInfo.name ?? 'Unknow', mInfo.singer ?? '')
-    singer = lyric ?? ''
+    singer = shouldShowBluetoothLyric ? lyric : fullLyric ?? ''
     album = ''
-  } else if (!state.isPlaying || lyric == null) {
+  } else if (!shouldShowBluetoothLyric) {
     name = mInfo.name ?? 'Unknow'
     singer = mInfo.singer ?? 'Unknow'
     album = mInfo.album ?? undefined
@@ -122,6 +125,7 @@ const updateMetaInfo = async(mInfo: LX.Player.MusicInfo, lyric?: string, isPlayi
     elapsedTime: isNativeFlacActive()
       ? await getNativeFlacPosition().catch(() => 0)
       : await getAccuratePosition().catch(() => 0),
+    lyric: fullLyric,
   }
   await updateCurrentTrackMetadata(metadata)
 }
