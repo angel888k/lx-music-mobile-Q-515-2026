@@ -16,10 +16,10 @@ import {
   toggleDesktopLyricTranslation,
   toggleDesktopLyricRoma,
 } from '@/core/desktopLyric'
-import { getPosition } from '@/plugins/player/utils'
+import { getPosition, updateNowPlayingTitles } from '@/plugins/player/utils'
 import playerState from '@/store/player/state'
 import { getLyricPayload } from '@/core/lyricInfo'
-// import settingState from '@/store/setting/state'
+import settingState from '@/store/setting/state'
 
 const getReliableLyricPosition = async() => {
   const progressPosition = Math.max(playerState.progress.nowPlayTime, 0)
@@ -53,6 +53,11 @@ export const init = async() => {
 const handleSetLyric = async(lyric: string, translation = '', romalrc = '') => {
   lrcSetLyric(lyric, translation, romalrc)
   await setDesktopLyric(lyric, translation, romalrc)
+  if (settingState.setting['player.isShowBluetoothFullLyric']) {
+    void updateNowPlayingTitles({
+      lyric,
+    })
+  }
 }
 
 /**

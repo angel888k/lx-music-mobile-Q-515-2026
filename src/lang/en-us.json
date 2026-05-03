@@ -356,6 +356,7 @@
   "setting_play_play_quality": "Prioritize Sound Quality for Playback If Available",
   "setting_play_s2t": "Convert Chinese lyrics that are playing to traditional",
   "setting_play_save_play_time": "Remember playback progress",
+  "setting_play_show_bluetooth_full_lyric": "Display complete Bluetooth lyrics (device support required)",
   "setting_play_sound_effect": "Sound Effects",
   "setting_play_sound_effect_enable": "Enable 10-band equalizer",
   "setting_play_sound_effect_environment": "Environmental Reverb",

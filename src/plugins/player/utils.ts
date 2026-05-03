@@ -237,10 +237,21 @@ export const setPlaybackRate = async(num: number) => {
   if (Platform.OS == 'ios' && isNativeFlacActive()) return setNativeFlacRate(num)
   return TrackPlayer.setRate(num)
 }
-export const updateNowPlayingTitles = async(duration: number, title: string, artist: string, album: string) => {
-  console.log('set playing titles', duration, title, artist, album)
+export interface NowPlayingTitles {
+  title?: string
+  artist?: string
+  album?: string
+  lyric?: string
+}
+export const updateNowPlayingTitles = async(titles: NowPlayingTitles) => {
+  console.log('set playing titles', titles)
   if (Platform.OS == 'ios') return Promise.resolve()
-  return TrackPlayer.updateNowPlayingTitles(duration, title, artist, album)
+  const updateTitles = TrackPlayer.updateNowPlayingTitles as unknown as {
+    (titles: NowPlayingTitles): Promise<void>
+    (duration: number, title: string, artist: string, album: string): Promise<void>
+  }
+  if (TrackPlayer.updateNowPlayingTitles.length <= 1) return updateTitles(titles)
+  return updateTitles(0, titles.title ?? titles.lyric ?? '', titles.artist ?? '', titles.album ?? '')
 }
 
 export const resetPlay = async() => Promise.all([setPause(), setCurrentTime(0)])

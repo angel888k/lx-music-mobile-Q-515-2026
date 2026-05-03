@@ -2,6 +2,7 @@ import TrackPlayer from 'react-native-track-player'
 import { defaultUrl } from '@/config'
 import { NativeModules, Platform } from 'react-native'
 import settingState from '@/store/setting/state'
+import playerState from '@/store/player/state'
 import { seekToTime } from './seek'
 import { clearNowPlayingInfo, updateNowPlayingInfo } from '@/utils/nativeModules/nowPlaying'
 
@@ -61,12 +62,20 @@ export const formatMusicInfo = (musicInfo: LX.Player.PlayMusic) => {
   }
 }
 
+const getCurrentFullLyric = (targetId: string | null) => {
+  return (settingState.setting['player.isShowBluetoothFullLyric'] && targetId &&
+      playerState.musicInfo.id == targetId && playerState.musicInfo.lrc)
+    ? playerState.musicInfo.lrc
+    : undefined
+}
+
 export const buildTracks = (musicInfo: LX.Player.PlayMusic, url?: LX.Player.Track['url'], duration?: LX.Player.Track['duration']): LX.Player.Track[] => {
   const mInfo = formatMusicInfo(musicInfo)
   const track = [] as LX.Player.Track[]
   const isShowNotificationImage = settingState.setting['player.isShowNotificationImage']
   const album = mInfo.album || undefined
   const artwork = isShowNotificationImage && mInfo.pic && httpRxp.test(mInfo.pic) ? mInfo.pic : undefined
+  const lyric = getCurrentFullLyric(mInfo.id)
   if (url) {
     track.push({
       id: `${mInfo.id}__//${Math.random()}__//${url}`,
@@ -77,6 +86,7 @@ export const buildTracks = (musicInfo: LX.Player.PlayMusic, url?: LX.Player.Trac
       artwork,
       userAgent: defaultUserAgent,
       musicId: mInfo.id,
+      lyric,
       duration,
     })
   }
@@ -89,6 +99,7 @@ export const buildTracks = (musicInfo: LX.Player.PlayMusic, url?: LX.Player.Trac
       album,
       artwork,
       musicId: mInfo.id,
+      lyric,
       duration: 0,
     })
   }
@@ -132,6 +143,7 @@ export const updateCurrentTrackMetadata = async(metadata: {
   duration?: number
   elapsedTime?: number
   playbackRate?: number
+  lyric?: string
 }) => {
   const currentTrackIndex = await TrackPlayer.getCurrentTrack().catch(() => null)
   if (currentTrackIndex != null && currentTrackIndex > -1) {
@@ -157,6 +169,7 @@ export const ensureCurrentTrackMetadata = (metadata: {
   duration?: number
   elapsedTime?: number
   playbackRate?: number
+  lyric?: string
 }) => {
   void (async() => {
     const targetMetadata = Platform.OS == 'ios' ? formatIOSNowPlayingMetadata(metadata) : metadata
@@ -186,6 +199,7 @@ export const restoreTrack = async(track: LX.Player.Track, position: number, isPl
     artwork: typeof restoredTrack.artwork == 'string' ? restoredTrack.artwork : undefined,
     duration: restoredTrack.duration,
     elapsedTime: position,
+    lyric: typeof restoredTrack.lyric == 'string' ? restoredTrack.lyric : undefined,
   })
 }
 

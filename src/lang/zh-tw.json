@@ -356,6 +356,7 @@
   "setting_play_play_quality": "優先播放的音質（如果可用）",
   "setting_play_s2t": "將播放的中文歌詞轉換為繁體",
   "setting_play_save_play_time": "記住播放進度",
+  "setting_play_show_bluetooth_full_lyric": "顯示完整藍牙歌詞（需裝置支援）",
   "setting_play_sound_effect": "音效設定",
   "setting_play_sound_effect_enable": "啟用 10 段均衡器",
   "setting_play_sound_effect_environment": "環境混響音效",

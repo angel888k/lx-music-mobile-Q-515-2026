@@ -77,6 +77,7 @@ declare global {
 
       interface Track extends RNTrack {
         musicId: string
+        lyric?: string
         // original: PlayMusic
         // quality: LX.Quality
       }

@@ -70,6 +70,6 @@ export const loadPlaybackResource = async({
     artwork: typeof track.artwork == 'string' ? track.artwork : undefined,
     duration: track.duration,
     elapsedTime: time,
+    lyric: typeof track.lyric == 'string' ? track.lyric : undefined,
   })
 }
-

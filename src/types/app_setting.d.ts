@@ -216,6 +216,11 @@ declare global {
       'player.isShowBluetoothLyric': boolean
 
       /**
+       * 是否启用蓝牙完整歌词
+       */
+      'player.isShowBluetoothFullLyric': boolean
+
+      /**
        * 是否启用音效
        */
       'player.soundEffect.enabled': boolean
